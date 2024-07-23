@@ -41,7 +41,7 @@ __all__ = [
 ]
 class SimplicitsObject:
     def __init__(self, pts, yms, prs, rhos, appx_vol, num_handles=10, num_samples=1000, model_layers=6, 
-                training_batch_size=10):
+                training_batch_size=10, normalize_for_training=True):
         r""" Easy to use wrapper for initializing and training a simplicits object based on the paper https://research.nvidia.com/labs/toronto-ai/simplicits/
 
         Args:
@@ -61,6 +61,7 @@ class SimplicitsObject:
         
         self.default_device = pts.device
         self.default_dtype = pts.dtype
+        self.normalize_for_training = normalize_for_training
 
         self.num_handles = num_handles
         self.pts = torch.as_tensor(pts, device=self.default_device, dtype=self.default_dtype)
@@ -80,8 +81,11 @@ class SimplicitsObject:
         bb_vol = (self.bb_max[0] - self.bb_min[0]) * (self.bb_max[1] - self.bb_min[1]) * (self.bb_max[2] - self.bb_min[2])
         norm_bb_vol = (norm_bb_max[0] - norm_bb_min[0]) * (norm_bb_max[1] - norm_bb_min[1]) * (norm_bb_max[2] - norm_bb_min[2])
 
-        norm_appx_vol = self.appx_vol*(norm_bb_vol/bb_vol)
-        
+        if (self.normalize_for_training):
+            norm_appx_vol = self.appx_vol*(norm_bb_vol/bb_vol)
+        else:
+            norm_appx_vol = self.appx_vol
+            
         self.normalized_pts = self.pts#(self.pts - self.bb_min)/(self.bb_max - self.bb_min)
 
         self.num_samples = num_samples
@@ -96,7 +100,10 @@ class SimplicitsObject:
         if self.num_handles == 0:
             self.model_plus_rigid = lambda pts: torch.ones((pts.shape[0], 1), device=self.default_device)
         else:
-            self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1) 
+            if (self.normalize_for_training):
+                self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
+            else:
+                self.model_plus_rigid = lambda pts: torch.cat((self.model(pts), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1) 
 
     def save_model(self, pth):
         r"""Saves the Simplicits network model (not including rigid mode)
@@ -116,7 +123,10 @@ class SimplicitsObject:
         if self.num_handles == 0:
             self.model_plus_rigid = lambda pts: torch.ones((pts.shape[0], 1), device=self.default_device)
         else:
-            self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
+            if(self.normalize_for_training):
+                self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
+            else:
+                self.model_plus_rigid = lambda pts: torch.cat((self.model(pts), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
 
     def train(self, num_steps=10000, lr_start=1e-3, lr_end=1e-3, le_coeff=1e-1, lo_coeff=1e6):
         r"""Trains object. If object has already been trained, calling this function will replace the previously trained results.
@@ -151,8 +161,9 @@ class SimplicitsObject:
             for grp in optimizer.param_groups:
                 grp['lr'] = lr_start + float(i/num_steps)*(lr_end - lr_start)
 
-            # if i%100 == 0:
-            #     logger.debug(f'Training step: {i}, le: {le.item()}, lo: {lo.item()}')
+            if i%100 == 0:
+                print(f'Training step: {i}, le: {le.item()}, lo: {lo.item()}')
+                # logger.debug(f'Training step: {i}, le: {le.item()}, lo: {lo.item()}')
 
         self.model.eval()
 
@@ -420,17 +431,18 @@ class SimplicitsScene:
         self.current_id = 0
         self.sim_obj_dict = {}
 
-    def add_object(self, sim_object:SimplicitsObject, init_tfm=None):
+    def add_object(self, sim_object:SimplicitsObject, num_cub_pts = 1000, init_tfm=None):
         r"""Adds a simplicits object to the scene as a SimulatedObject.
 
         Args:
             sim_object (SimplicitsObject): Simplicits object that will be wrapped into a SimulatedObject for this scene.
+            num_cub_pts (int, optional): Number of cubature pts (integration primitives) to sample during simulation. Defaults to 1000.
             init_tfm (torch.Tensor, optional): Initial transformation of the object, shape of :math:`[3,4]`. Defaults to None (no initial transformation).
 
         Returns:
             int: Id of object in the scene.
         """
-        self.sim_obj_dict[self.current_id] = SimulatedObject(sim_object, init_tfm=init_tfm)
+        self.sim_obj_dict[self.current_id] = SimulatedObject(sim_object, num_cub_pts=num_cub_pts, init_tfm=init_tfm)
         self.current_id += 1
         return self.current_id-1
 
