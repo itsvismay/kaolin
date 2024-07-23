@@ -161,8 +161,8 @@ class SimplicitsObject:
             for grp in optimizer.param_groups:
                 grp['lr'] = lr_start + float(i/num_steps)*(lr_end - lr_start)
 
-            if i%100 == 0:
-                print(f'Training step: {i}, le: {le.item()}, lo: {lo.item()}')
+            #if i%100 == 0:
+                #print(f'Training step: {i}, le: {le.item()}, lo: {lo.item()}')
                 # logger.debug(f'Training step: {i}, le: {le.item()}, lo: {lo.item()}')
 
         self.model.eval()
