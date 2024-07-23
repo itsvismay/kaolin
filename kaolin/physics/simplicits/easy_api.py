@@ -81,10 +81,8 @@ class SimplicitsObject:
         bb_vol = (self.bb_max[0] - self.bb_min[0]) * (self.bb_max[1] - self.bb_min[1]) * (self.bb_max[2] - self.bb_min[2])
         norm_bb_vol = (norm_bb_max[0] - norm_bb_min[0]) * (norm_bb_max[1] - norm_bb_min[1]) * (norm_bb_max[2] - norm_bb_min[2])
 
-        if (self.normalize_for_training):
-            norm_appx_vol = self.appx_vol*(norm_bb_vol/bb_vol)
-        else:
-            norm_appx_vol = self.appx_vol
+        norm_appx_vol = self.appx_vol*(norm_bb_vol/bb_vol)
+        
             
         self.normalized_pts = self.pts#(self.pts - self.bb_min)/(self.bb_max - self.bb_min)
 
@@ -100,10 +98,7 @@ class SimplicitsObject:
         if self.num_handles == 0:
             self.model_plus_rigid = lambda pts: torch.ones((pts.shape[0], 1), device=self.default_device)
         else:
-            if (self.normalize_for_training):
-                self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
-            else:
-                self.model_plus_rigid = lambda pts: torch.cat((self.model(pts), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1) 
+            self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
 
     def save_model(self, pth):
         r"""Saves the Simplicits network model (not including rigid mode)
@@ -123,10 +118,7 @@ class SimplicitsObject:
         if self.num_handles == 0:
             self.model_plus_rigid = lambda pts: torch.ones((pts.shape[0], 1), device=self.default_device)
         else:
-            if(self.normalize_for_training):
-                self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
-            else:
-                self.model_plus_rigid = lambda pts: torch.cat((self.model(pts), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
+            self.model_plus_rigid = lambda pts: torch.cat((self.model((pts-self.bb_min)/(self.bb_max-self.bb_min)), torch.ones((pts.shape[0], 1), device=self.default_device)), dim=1)
 
     def train(self, num_steps=10000, lr_start=1e-3, lr_end=1e-3, le_coeff=1e-1, lo_coeff=1e6):
         r"""Trains object. If object has already been trained, calling this function will replace the previously trained results.
@@ -179,7 +171,7 @@ class SimulatedObject:
                 num_cub_pts (int, optional): Number of cubature points (integration primitives). Defaults to 1000
         """
         self.simplicits_object = obj
-
+        self.num_cub_pts = num_cub_pts
         self._sample_cubatures(num_cub_pts=num_cub_pts)
         self.reset_sim_state(init_tfm)
         self._set_sim_constants()
@@ -267,7 +259,7 @@ class SimulatedObject:
         self.x0_flat = self.sim_pts.flatten().unsqueeze(-1).detach()
         self.weights = self.simplicits_object.model_plus_rigid(self.sim_normalized_pts) 
         self.M, self.invM = precomputed.lumped_mass_matrix(self.sim_rhos, self.simplicits_object.appx_vol, dim = 3)
-        self.bigI = torch.tile(torch.eye(3, device=self.simplicits_object.default_device).flatten().unsqueeze(dim=1), (self.simplicits_object.num_samples,1)).detach()
+        self.bigI = torch.tile(torch.eye(3, device=self.simplicits_object.default_device).flatten().unsqueeze(dim=1), (self.num_cub_pts,1)).detach()
 
         self.dFdz = precomputed.jacobian_dF_dz(self.simplicits_object.model_plus_rigid, self.sim_normalized_pts, self.z).detach() 
         self.B = precomputed.lbs_matrix(self.sim_pts, self.weights).detach() 
