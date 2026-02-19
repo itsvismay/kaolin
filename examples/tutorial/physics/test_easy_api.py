@@ -67,6 +67,13 @@ parser.add_argument(
     default=None,
     help="Run simulation headless for N steps (no interactive window)"
 )
+parser.add_argument(
+    "--method",
+    type=str,
+    choices=["trained", "rkpm"],
+    default="trained",
+    help="Method to create SimplicitsObject: 'trained' (neural network) or 'rkpm' (RKPM) (default: trained)"
+)
 
 args = parser.parse_args()
 
@@ -121,23 +128,37 @@ if args.load_skinning and os.path.exists(args.load_skinning):
         pts, yms, prs, rhos, approx_volume, skinning_fcn
     )
 else:
-    logger.info("Training SimplicitsObject (this will take a couple of minutes)...")
-    sim_obj = kal.physics.simplicits.SimplicitsObject.create_trained(
-        pts,  # sampled points
-        yms,  # material stiffness
-        prs,  # material compressibility ratio
-        rhos,  # material density
-        approx_volume,  # volume
-        num_handles=5,  # skinning handles (DOFs)
-        training_num_steps=10000,
-        training_lr_start=1e-3,
-        training_lr_end=1e-3,
-        training_le_coeff=1e-1,
-        training_lo_coeff=1e6,
-        training_log_every=1000,
-        normalize_for_training=True
-    )
-    logger.info("Training completed!")
+    if args.method == "trained":
+        logger.info("Training SimplicitsObject using neural network (this will take a couple of minutes)...")
+        sim_obj = kal.physics.simplicits.SimplicitsObject.create_trained(
+            pts,  # sampled points
+            yms,  # material stiffness
+            prs,  # material compressibility ratio
+            rhos,  # material density
+            approx_volume,  # volume
+            num_handles=5,  # skinning handles (DOFs)
+            training_num_steps=10000,
+            training_lr_start=1e-3,
+            training_lr_end=1e-3,
+            training_le_coeff=1e-1,
+            training_lo_coeff=1e6,
+            training_log_every=1000,
+            normalize_for_training=True
+        )
+        logger.info("Training completed!")
+    elif args.method == "rkpm":
+        logger.info("Creating SimplicitsObject using RKPM method...")
+        sim_obj = kal.physics.simplicits.SimplicitsObject.create_rkpm(
+            pts,  # sampled points
+            yms,  # material stiffness
+            prs,  # material compressibility ratio
+            rhos,  # material density
+            approx_volume,  # volume
+            num_handles=5,  # skinning handles (DOFs)
+            num_points=16384,  # number of sample points for RKPM
+            num_nodes=1024  # number of nodes for RKPM
+        )
+        logger.info("RKPM object created!")
 
     # Optionally save the trained function
     if args.save_skinning:
@@ -145,7 +166,7 @@ else:
         if save_dir and not os.path.exists(save_dir):
             os.makedirs(save_dir)
         torch.save(sim_obj.skinning_weight_function, args.save_skinning)
-        logger.info(f"Saved trained skinning function to {args.save_skinning}")
+        logger.info(f"Saved skinning function to {args.save_skinning}")
 
 # Create scene
 logger.info("Creating scene...")

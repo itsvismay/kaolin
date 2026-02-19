@@ -25,6 +25,7 @@ from functools import partial
 
 from kaolin.physics.simplicits.losses import compute_losses
 from kaolin.physics.simplicits.network import SimplicitsMLP
+from kaolin.physics.simplicits.rkpm import SimplicitsRKPM
 
 import kaolin.physics.utils.warp_utilities as warp_utilities
 import kaolin.physics.utils.torch_utilities as torch_utilities
@@ -222,6 +223,39 @@ class SimplicitsObject:
 
         
         return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function)
+    
+    @staticmethod
+    def create_rkpm(pts, yms, prs, rhos, appx_vol,
+                               num_handles=10,
+                               num_points=16384,
+                               num_nodes=1024):
+
+        if num_handles == 0:
+            warnings.warn(
+                f'Num Handles is 0. Simplicits Object will be created as rigid.', UserWarning)
+
+            return SimplicitsObject.create_rigid(pts, yms, prs, rhos, appx_vol)
+
+        if not torch.is_tensor(yms):
+            yms = torch.full((pts.shape[0],), yms, dtype=pts.dtype, device=pts.device)
+        if not torch.is_tensor(prs):
+            prs = torch.full((pts.shape[0],), prs, dtype=pts.dtype, device=pts.device)
+        if not torch.is_tensor(rhos):
+            rhos = torch.full((pts.shape[0],), rhos, dtype=pts.dtype, device=pts.device)
+        if not torch.is_tensor(appx_vol):
+            appx_vol = torch.tensor([appx_vol], dtype=pts.dtype, device=pts.device)
+
+        device = pts.device
+
+        model = SimplicitsRKPM(num_points, num_handles, num_nodes)
+        model.to(device)
+
+        model.init(pts, yms, prs, rhos, appx_vol)
+
+        import pdb; pdb.set_trace()
+
+        return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function=model)
+
 
 
     @staticmethod
