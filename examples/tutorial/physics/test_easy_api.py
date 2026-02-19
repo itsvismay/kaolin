@@ -46,11 +46,6 @@ parser.add_argument(
     help="Path to save trained skinning function to disk"
 )
 parser.add_argument(
-    "--visualize-samples",
-    action="store_true",
-    help="Visualize sample points before simulation"
-)
-parser.add_argument(
     "--num-steps",
     type=int,
     default=100,
@@ -73,6 +68,11 @@ parser.add_argument(
     choices=["trained", "rkpm"],
     default="trained",
     help="Method to create SimplicitsObject: 'trained' (neural network) or 'rkpm' (RKPM) (default: trained)"
+)
+parser.add_argument(
+    "--visualize-weights",
+    action="store_true",
+    help="Visualize RKPM skinning weights on sample points"
 )
 
 args = parser.parse_args()
@@ -111,13 +111,6 @@ rhos = torch.full((pts.shape[0],), rho, device="cuda")
 
 logger.info(f"Sampled {pts.shape[0]} points within mesh volume")
 
-# Optionally visualize sample points
-if args.visualize_samples:
-    logger.info("Visualizing sample points...")
-    ps.init()
-    ps.register_point_cloud("Sample Points", pts.cpu().detach().numpy(), radius=0.003)
-    ps.show()
-
 # Create or load trained object
 skinning_path = args.load_skinning or args.save_skinning
 
@@ -154,9 +147,10 @@ else:
             prs,  # material compressibility ratio
             rhos,  # material density
             approx_volume,  # volume
-            num_handles=5,  # skinning handles (DOFs)
+            num_handles=10,  # skinning handles (DOFs)
             num_points=16384,  # number of sample points for RKPM
-            num_nodes=1024  # number of nodes for RKPM
+            num_nodes=1024,  # number of nodes for RKPM
+            use_double=True,
         )
         logger.info("RKPM object created!")
 
@@ -168,11 +162,39 @@ else:
         torch.save(sim_obj.skinning_weight_function, args.save_skinning)
         logger.info(f"Saved skinning function to {args.save_skinning}")
 
+# Optionally visualize skinning weights
+if args.visualize_weights:
+    logger.info("Visualizing skinning weights...")
+    ps.init()
+
+    # Compute skinning weights
+    with torch.no_grad():
+        weights = sim_obj.skinning_weight_function(pts)  # Shape: (num_pts, num_handles)
+
+    logger.info(f"Skinning weights shape: {weights.shape}")
+
+    # Register point cloud
+    ps_pts = ps.register_point_cloud("Sample Points", pts.cpu().detach().numpy(), radius=0.003)
+
+    # Visualize each handle's weights as a scalar quantity
+    num_handles = weights.shape[1]
+    for i in range(num_handles):
+        weight_values = weights[:, i].cpu().detach().numpy()
+        ps_pts.add_scalar_quantity(f"Handle_{i}_weight", weight_values, enabled=(i==0))
+
+    # Also show the dominant handle for each point
+    dominant_handle = torch.argmax(weights, dim=1).cpu().detach().numpy()
+    ps_pts.add_scalar_quantity("Dominant_Handle", dominant_handle, enabled=True, cmap="rainbow")
+
+    logger.info(f"Visualizing {num_handles} skinning weight handles")
+    ps.show()
+
 # Create scene
 logger.info("Creating scene...")
 scene = kal.physics.simplicits.SimplicitsScene()
 scene.max_newton_steps = 5
-scene.timestep = 0.03
+# scene.timestep = 0.03
+scene.timestep = 0.01
 scene.direct_solve = True
 
 # Add object to scene

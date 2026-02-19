@@ -36,6 +36,7 @@ class SimplicitsRKPM(nn.Module):
         radius_scale: float = 1.0,
         radius_init_kNN: int = 2,
         radius_min: Union[float, str, None] = "3x",
+        use_double: bool = True,
     ):
         super(SimplicitsRKPM, self).__init__()
         self.num_points = num_points
@@ -48,9 +49,15 @@ class SimplicitsRKPM(nn.Module):
         self.radius_min = radius_min
 
         self.rkpm = RKPM(num_nodes, kernel_type)
+
+        self.use_double = use_double  # force double precision for all computations involving RKPM
+        if self.use_double:
+            self.rkpm.double()
+
         # eigenvectors
-        self.evecs = nn.Parameter(torch.zeros(num_nodes, num_handles))
+        self.evecs = nn.Parameter(torch.zeros(num_nodes, num_handles, dtype=torch.float64 if use_double else torch.float32))
         self.evecs.requires_grad = False
+
 
     def init(self, pts, yms, prs, rhos, appx_vol):
         # currently assume all integration samples have equal volume weights = appx_vol / num_points, weights cancelled out
@@ -86,10 +93,17 @@ class SimplicitsRKPM(nn.Module):
         # Farthest Point Sampling to determine integration points
         sample_indices = farthest_point_sampling(pts[None], self.num_points).squeeze(0)
         x = pts[sample_indices]
+        yms_x = yms[sample_indices]
+        prs_x = prs[sample_indices]
+
+        if self.use_double:
+            x = x.to(dtype=torch.float64)
+            yms_x = yms_x.to(dtype=torch.float64)
+            prs_x = prs_x.to(dtype=torch.float64)
 
         # Perform eigenanalysis
         M = self.get_mass_matrix(x)
-        H = self.get_hessian_matrix(x, yms[sample_indices], prs[sample_indices])
+        H = self.get_hessian_matrix(x, yms_x, prs_x)
 
         # add one for the zero eigenvalue
         evals, evecs = torch.lobpcg(A=H, B=M, k=(self.num_handles + 1), largest=False, X=None)
@@ -113,7 +127,11 @@ class SimplicitsRKPM(nn.Module):
         return H
 
     def forward(self, x):
-        return self.rkpm(x, self.evecs)
+        dtype = x.dtype
+        if self.use_double:
+            x = x.to(dtype=torch.float64)
+            self.evecs = self.evecs.to(dtype=torch.float64)
+        return self.rkpm(x, self.evecs).to(dtype=dtype)
 
 
 class RKPM(nn.Module):

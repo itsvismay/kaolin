@@ -228,7 +228,8 @@ class SimplicitsObject:
     def create_rkpm(pts, yms, prs, rhos, appx_vol,
                                num_handles=10,
                                num_points=16384,
-                               num_nodes=1024):
+                               num_nodes=1024,
+                               use_double=True):
 
         if num_handles == 0:
             warnings.warn(
@@ -247,14 +248,14 @@ class SimplicitsObject:
 
         device = pts.device
 
-        model = SimplicitsRKPM(num_points, num_handles, num_nodes)
+        model = SimplicitsRKPM(num_points, num_handles, num_nodes, use_double=use_double)
         model.to(device)
 
         model.init(pts, yms, prs, rhos, appx_vol)
 
-        import pdb; pdb.set_trace()
+        skinning_weight_function = SkinningWeightsFcn(model)
 
-        return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function=model)
+        return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function)
 
 
 
