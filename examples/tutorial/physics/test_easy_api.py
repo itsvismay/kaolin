@@ -24,9 +24,11 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # Logger used in the api code
-logging.getLogger('kaolin.physics').setLevel(logging.INFO)
+# logging.getLogger('kaolin.physics').setLevel(logging.INFO)
+logging.getLogger('kaolin.physics').setLevel(logging.DEBUG)
 
 sys.path.append(str(Path(__file__).parent.parent))
+from kaolin.physics.utils import warp_utilities
 from tutorial_common import COMMON_DATA_DIR
 
 # Parse command line arguments
@@ -73,6 +75,18 @@ parser.add_argument(
     "--visualize-weights",
     action="store_true",
     help="Visualize RKPM skinning weights on sample points"
+)
+parser.add_argument(
+    "--normalize-weights",
+    action="store_true",
+    default=True,
+    help="Normalize skinning weights by samples when adding object to scene (default: True)"
+)
+parser.add_argument(
+    "--no-normalize-weights",
+    dest="normalize_weights",
+    action="store_false",
+    help="Disable weight normalization by samples"
 )
 
 args = parser.parse_args()
@@ -189,20 +203,29 @@ if args.visualize_weights:
     logger.info(f"Visualizing {num_handles} skinning weight handles")
     ps.show()
 
+w = sim_obj.skinning_weight_function(pts)
+print("Before normalization, w.T @ w cond number {}".format(torch.linalg.cond(w.T @ w)))
+
 # Create scene
 logger.info("Creating scene...")
 scene = kal.physics.simplicits.SimplicitsScene()
-scene.max_newton_steps = 5
+scene.max_newton_steps = 10
 # scene.timestep = 0.03
 scene.timestep = 0.01
 scene.direct_solve = True
 
 # Add object to scene
-obj_idx = scene.add_object(sim_obj)
+obj_idx = scene.add_object(sim_obj, normalize_weights_by_samples=args.normalize_weights)
 
 # Set gravity and floor forces
 scene.set_scene_gravity(acc_gravity=torch.tensor([0, 9.8, 0]))
 scene.set_scene_floor(floor_height=-0.8, floor_axis=1, floor_penalty=1000)
+
+w = sim_obj.skinning_weight_function(pts)
+print("After normalization, w.T @ w cond number {}".format(torch.linalg.cond(w.T @ w)))
+
+sim_BMB_th = warp_utilities._wp_bsr_to_torch_bsr(scene.sim_BMB).to_dense()
+print("sim_BMB cond number {}".format(torch.linalg.cond(sim_BMB_th)))
 
 logger.info("Scene created with gravity and floor")
 
