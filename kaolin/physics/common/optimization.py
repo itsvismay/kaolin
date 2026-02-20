@@ -151,10 +151,13 @@ def newtons_method(x,
     # Get the kinematic dofs
     t_x_kinematic = wp.to_torch(x) - wp.to_torch(_red_to_full(P, _full_to_red(Pt, x))) # x - P @ Pt @ x
 
+    # logger.debug(f"-------------------------------- Starting Newton's method --------------------------------")
+    converged = False
     for k in range(nm_max_iters):
         E_curr = energy_fcn(x)  # scalar
         G_curr = gradient_fcn(x).flatten()  # vector
         H_curr = hessian_fcn(x)  # sparse matrix
+        # logger.debug(f"Step {k}: E_curr: {E_curr}")
 
         # Project out the kinematic dofs
         if P is not None:
@@ -191,6 +194,7 @@ def newtons_method(x,
 
         # Converges if the directional update is small
         if (torch.abs(t_red_dx.t() @ t_red_g) < conv_tol):
+            converged = True
             logger.debug(f"Newton: Converged in {k} iterations")
             break
 
@@ -215,5 +219,8 @@ def newtons_method(x,
 
         t_x = wp.to_torch(_red_to_full(P, wp.from_torch(t_red_x))) + t_x_kinematic 
         x = wp.from_torch(t_x)
-    
+
+    if not converged:
+        logger.debug(f"Newton: Not converged in {k} iterations")
+
     return x

@@ -30,6 +30,7 @@ __all__ = [
     "sparse_collision_jacobian_matrix", 
     "sparse_mass_matrix",
     "sparse_dFdz_matrix_from_dense",
+    "sparse_dFdz_matrix",
     'lumped_mass_matrix',
     'lbs_matrix',
     'jacobian_dF_dz',
@@ -113,6 +114,8 @@ def _get_collision_jacobian_triplets_wp_kernel(
 
 @wp.kernel
 def _get_dFdz_triplets_wp_kernel(sim_weights: wp.array2d(dtype=wp.float32),
+                        sim_weights_jac: wp.array3d(dtype=wp.float32),
+                        sim_pts: wp.array(dtype=wp.vec3),
                         rows: wp.array(dtype=wp.int32),
                         cols: wp.array(dtype=wp.int32),
                         vals: wp.array(dtype=wp.float32),
@@ -125,31 +128,33 @@ def _get_dFdz_triplets_wp_kernel(sim_weights: wp.array2d(dtype=wp.float32),
 
     if i < sim_weights.shape[0]:
         # For each sample point, and each handle we need to fill the following matrix:
-        # [[1, 0, 0, 0, 0, 0, 0, 0, 0 ,0, 0 ,0],
-        #  [0, 1, 0, 0, 0, 0, 0, 0, 0 ,0, 0 ,0],
-        #  [0, 0, 1, 0, 0, 0, 0, 0, 0 ,0, 0 ,0],
-        #  [0, 0, 0, 0, 1, 0, 0, 0, 0 ,0, 0 ,0],
-        #  [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
-        #  [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
-        #  [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
-        #  [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
-        #  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]]
+        # [[w + x * dw/dx, y * dw/dx, z * dw/dx, dw/dx, 0, 0, 0, 0, 0, 0, 0, 0],
+        #  [x * dw/dy, w + y * dw/dy, z * dw/dy, dw/dy, 0, 0, 0, 0, 0, 0, 0, 0],
+        #  [x * dw/dz, y * dw/dz, w + z * dw/dz, dw/dz, 0, 0, 0, 0, 0, 0, 0, 0],
+        #  [0, 0, 0, 0, w + x * dw/dx, y * dw/dx, z * dw/dx, dw/dx, 0, 0, 0, 0],
+        #  [0, 0, 0, 0, x * dw/dy, w + y * dw/dy, z * dw/dy, dw/dy, 0, 0, 0, 0],
+        #  [0, 0, 0, 0, x * dw/dz, y * dw/dz, w + z * dw/dz, dw/dz, 0, 0, 0, 0],
+        #  [0, 0, 0, 0, 0, 0, 0, 0, w + x * dw/dx, y * dw/dx, z * dw/dx, dw/dx],
+        #  [0, 0, 0, 0, 0, 0, 0, 0, x * dw/dy, w + y * dw/dy, z * dw/dy, dw/dy],
+        #  [0, 0, 0, 0, 0, 0, 0, 0, x * dw/dz, w + y * dw/dz, z * dw/dz, dw/dz],
 
         for h in range(sim_weights.shape[1]):
-            col = 12*h
-            weight = sim_weights[i, h]
+            col_base = 12*h
 
-            for d in range(dim*dim):
-                row = dim*dim*i + d
-                # Skip the (dim+1)'th column (translations)
-                if (col+1) % (dim+1) == 0:
-                    col += 1
-                idx = wp.atomic_add(triplet_index, 0, 1)
-                rows[idx] = row
-                cols[idx] = col
-                vals[idx] = weight * wp.float32(1.0)
+            row_base = dim * dim * i
 
-                col += 1
+            for b in range(dim):
+                for m in range(dim):
+                    for n in range(dim + 1):
+                        idx = wp.atomic_add(triplet_index, 0, 1)
+                        rows[idx] = row_base + b * dim + m
+                        cols[idx] = col_base + b * (dim + 1) + n
+                        if m == n:
+                            vals[idx] = sim_weights[i, h] + sim_pts[i][m] * sim_weights_jac[i, h, m]
+                        elif n == dim:
+                            vals[idx] = sim_weights_jac[i, h, m]
+                        else:
+                            vals[idx] = sim_pts[i][n] * sim_weights_jac[i, h, m]
 
 
 def sparse_lbs_matrix(sim_weights, sim_pts):
@@ -264,11 +269,12 @@ def sparse_dFdz_matrix_from_dense(enriched_weights_fcn, pts):
     return _warp_csr_from_torch_dense(dense_dFdz)
 
 
-def _sparse_dFdz_matrix(sim_weights: np.ndarray):  # pragma: no cover
+def sparse_dFdz_matrix(sim_weights: np.ndarray, sim_weights_jac: np.ndarray, sim_pts: np.ndarray):  # pragma: no cover
     r"""Creates a sparse Jacobian matrix of the deformation gradient with respect to the sample points.
 
     Args:
-        sim_weights (wp.array2d(dtype=wp.float32)): Skinning weights.
+        sim_weights (array, shape (num_samples, num_handles)): Skinning weights.
+        sim_weights_jac (array, shape (num_samples, num_handles, 3)): Gradient of the skinning weights with respect to the sample points.
 
     Returns:
         wp.sparse.bsr_matrix: Sparse Jacobian matrix of size :math:`(9 \text{num_samples}, 12 \text{num_handles})`
@@ -279,7 +285,7 @@ def _sparse_dFdz_matrix(sim_weights: np.ndarray):  # pragma: no cover
     num_samples = sim_weights.shape[0]
     num_handles = sim_weights.shape[1]
 
-    nnz = 9 * num_samples * num_handles
+    nnz = 36 * num_samples * num_handles
 
     rows = wp.zeros(nnz, dtype=wp.int32)
     cols = wp.zeros(nnz, dtype=wp.int32)
@@ -290,6 +296,8 @@ def _sparse_dFdz_matrix(sim_weights: np.ndarray):  # pragma: no cover
         kernel=_get_dFdz_triplets_wp_kernel,
         dim=num_samples,
         inputs=[wp.array(sim_weights, dtype=wp.float32),
+                wp.array(sim_weights_jac, dtype=wp.float32),
+                wp.array(sim_pts, dtype=wp.vec3),
                 rows,
                 cols,
                 vals,
@@ -297,7 +305,7 @@ def _sparse_dFdz_matrix(sim_weights: np.ndarray):  # pragma: no cover
     )
 
     num_rows = 9 * num_samples  # 9 per sample
-    num_cols = 12*num_handles  # 12 per handle
+    num_cols = 12 * num_handles  # 12 per handle
 
     dFdz_csr_matrix = wps.bsr_zeros(num_rows, num_cols, block_type=wp.float32)
     wps.bsr_set_from_triplets(dFdz_csr_matrix, rows, cols, vals)

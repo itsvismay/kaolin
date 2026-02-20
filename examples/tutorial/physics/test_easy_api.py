@@ -36,16 +36,15 @@ parser = argparse.ArgumentParser(
     description="Simulate elastic deformations using Simplicits"
 )
 parser.add_argument(
-    "--load-skinning",
+    "--skinning-path",
     type=str,
     default=".default_cache.pth",
     help="Path to load pre-trained skinning function from disk"
 )
 parser.add_argument(
     "--save-skinning",
-    type=str,
-    default=".default_cache.pth",
-    help="Path to save trained skinning function to disk"
+    action="store_true",
+    help="Save trained skinning function to disk"
 )
 parser.add_argument(
     "--num-steps",
@@ -88,6 +87,18 @@ parser.add_argument(
     action="store_false",
     help="Disable weight normalization by samples"
 )
+parser.add_argument(
+    "--dFdz-from-weights",
+    action="store_true",
+    default=True,
+    help="Compute dFdz from weights when adding object to scene (default: True)"
+)
+parser.add_argument(
+    "--no-dFdz-from-weights",
+    dest="dFdz_from_weights",
+    action="store_false",
+    help="Disable dFdz computation from weights"
+)
 
 args = parser.parse_args()
 
@@ -126,11 +137,11 @@ rhos = torch.full((pts.shape[0],), rho, device="cuda")
 logger.info(f"Sampled {pts.shape[0]} points within mesh volume")
 
 # Create or load trained object
-skinning_path = args.load_skinning or args.save_skinning
+skinning_path = args.skinning_path
 
-if args.load_skinning and os.path.exists(args.load_skinning):
-    logger.info(f"Loading pre-trained skinning function from {args.load_skinning}...")
-    skinning_fcn = torch.load(args.load_skinning)
+if skinning_path and os.path.exists(skinning_path):
+    logger.info(f"Loading pre-trained skinning function from {skinning_path}...")
+    skinning_fcn = torch.load(skinning_path)
     sim_obj = kal.physics.simplicits.SimplicitsObject.create_from_function(
         pts, yms, prs, rhos, approx_volume, skinning_fcn
     )
@@ -169,12 +180,11 @@ else:
         logger.info("RKPM object created!")
 
     # Optionally save the trained function
-    if args.save_skinning:
-        save_dir = os.path.dirname(args.save_skinning)
-        if save_dir and not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        torch.save(sim_obj.skinning_weight_function, args.save_skinning)
-        logger.info(f"Saved skinning function to {args.save_skinning}")
+    save_dir = os.path.dirname(skinning_path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    torch.save(sim_obj.skinning_weight_function, skinning_path)
+    logger.info(f"Saved skinning function to {skinning_path}")
 
 # Optionally visualize skinning weights
 if args.visualize_weights:
@@ -215,7 +225,12 @@ scene.timestep = 0.01
 scene.direct_solve = True
 
 # Add object to scene
-obj_idx = scene.add_object(sim_obj, normalize_weights_by_samples=args.normalize_weights)
+obj_idx = scene.add_object(
+    sim_obj,
+    normalize_weights_by_samples=args.normalize_weights,
+    dFdz_from_weights=args.dFdz_from_weights,
+    num_qp=2000,
+)
 
 # Set gravity and floor forces
 scene.set_scene_gravity(acc_gravity=torch.tensor([0, 9.8, 0]))

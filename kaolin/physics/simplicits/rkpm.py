@@ -130,8 +130,15 @@ class SimplicitsRKPM(nn.Module):
         dtype = x.dtype
         if self.use_double:
             x = x.to(dtype=torch.float64)
-            self.evecs = self.evecs.to(dtype=torch.float64)
         return self.rkpm(x, self.evecs).to(dtype=dtype)
+    
+    def grad(self, x):
+        dtype = x.dtype
+        if self.use_double:
+            x = x.to(dtype=torch.float64)
+        grad_phi = self.rkpm.grad_phi(x)  # (n, N, D)
+        grad = torch.einsum("nNd,Nc->ncd", grad_phi, self.evecs)  # (n, D, C)
+        return grad.to(dtype=dtype)
 
 
 class RKPM(nn.Module):
