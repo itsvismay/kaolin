@@ -71,20 +71,24 @@ class SimplicitsRKPM(nn.Module):
             node_indices = farthest_point_sampling(pts[None], self.num_nodes).squeeze(0)
         
         nodes = pts[node_indices]
+        nodes_np = nodes.cpu().numpy()
+        nodes_kdtree = cKDTree(nodes_np)
+
+        pts_np = pts.cpu().numpy()
+        pts_kdtree = cKDTree(pts_np)
 
         # Compute node radii
-        pairwise_node_dist = torch.cdist(nodes, nodes, p=2)
-        assert self.radius_init_kNN >= 1
-        dist_topk = torch.topk(pairwise_node_dist, k=(self.radius_init_kNN + 1),
-            dim=-1, largest=False, sorted=True)  # +1 to include itself
-        node_radius = dist_topk.values[:, -1]
+        dists, _ = nodes_kdtree.query(nodes.cpu().numpy(), k=self.radius_init_kNN + 1, workers=-1)
+        node_radius = torch.tensor(dists[:, -1] * self.radius_scale, device=nodes.device, dtype=nodes.dtype)
+
         if isinstance(self.radius_min, float):
             node_radius = node_radius.clamp(min=self.radius_min)
         elif isinstance(self.radius_min, str):
             assert self.radius_min[-1] == "x", "radius_min must end with 'x'"
             min_dist_factor = float(self.radius_min[:-1])
-            node_min_dist = dist_topk.values[:, 1].mean()
-            node_radius = node_radius.clamp(min=node_min_dist * min_dist_factor)
+            pts_dists, _ = pts_kdtree.query(pts_np, k=2, workers=-1)
+            radius_min = pts_dists[:, -1].mean() * min_dist_factor
+            node_radius = node_radius.clamp(min=radius_min)
         else:
             raise ValueError("Unknown radius_min")
         
