@@ -227,8 +227,8 @@ class SimplicitsObject:
     @staticmethod
     def create_rkpm(pts, yms, prs, rhos, appx_vol,
                                num_handles=10,
-                               num_points=16384,
                                num_nodes=1024,
+                               num_points=None,
                                use_double=True):
 
         if num_handles == 0:
@@ -248,7 +248,7 @@ class SimplicitsObject:
 
         device = pts.device
 
-        model = SimplicitsRKPM(num_points, num_handles, num_nodes, use_double=use_double)
+        model = SimplicitsRKPM(num_handles, num_nodes, num_points=num_points, use_double=use_double)
         model.to(device)
 
         model.init(pts, yms, prs, rhos, appx_vol)

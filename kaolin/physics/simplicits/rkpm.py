@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Union
+from typing import Union, Optional
 
 import torch
 import torch.nn as nn
@@ -29,13 +29,13 @@ __all__ = [
 class SimplicitsRKPM(nn.Module):
     def __init__(
         self,
-        num_points: int,
         num_handles: int,
         num_nodes: int,
         kernel_type: str = "gaussian",
         radius_scale: float = 1.0,
         radius_init_kNN: int = 2,
         radius_min: Union[float, str, None] = "3x",
+        num_points: Optional[int] = None,
         use_double: bool = True,
     ):
         super(SimplicitsRKPM, self).__init__()
@@ -91,7 +91,10 @@ class SimplicitsRKPM(nn.Module):
         self.rkpm.set_kernels(nodes, node_radius)
 
         # Farthest Point Sampling to determine integration points
-        sample_indices = farthest_point_sampling(pts[None], self.num_points).squeeze(0)
+        if self.num_points is None:
+            sample_indices = torch.arange(pts.shape[0], device=pts.device)
+        else:
+            sample_indices = farthest_point_sampling(pts[None], self.num_points).squeeze(0)
         x = pts[sample_indices]
         yms_x = yms[sample_indices]
         prs_x = prs[sample_indices]
