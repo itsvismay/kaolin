@@ -226,13 +226,19 @@ class NeohookeanElasticMaterial:
     def __init__(self,
                  mu,
                  lam,
-                 integration_pt_volume):
+                 integration_pt_volume,
+                 reparameterize_lame=True):
         r""" Initializes a NeohookeanElasticMaterial object.
         Args:
             mu (wp.array(dtype=wp.float32)): Lame coefficient mu
             lam (wp.array(dtype=wp.float32)): Lame coefficient lambda
             integration_pt_volume (wp.array(dtype=wp.float32)): Volume distributed across each point
         """
+
+        self.reparameterize_lame = reparameterize_lame
+        if reparameterize_lame:
+            lam = lam + mu
+
         self.mu = mu
         self.lam = lam
         self.integration_pt_volume = integration_pt_volume
@@ -320,7 +326,7 @@ class NeohookeanElasticMaterial:
         return self.hessians_blocks
 
 
-def _neohookean_energy(mu, lam, defo_grad):  # pragma: no cover
+def _neohookean_energy(mu, lam, defo_grad, reparameterize_lame=True):  # pragma: no cover
     r"""Implements a version of neohookean energy. Calculate energy per-integration primitive. For more background information, refer to `Ted Kim's Siggraph Course Notes\
     <https://www.tkim.graphics/DYNAMIC_DEFORMABLES/>`_
 
@@ -332,6 +338,10 @@ def _neohookean_energy(mu, lam, defo_grad):  # pragma: no cover
     Returns:
         torch.Tensor: :math:`(\text{batch_dims}, 1)` vector of per defo-grad energy values
     """
+
+    if reparameterize_lame:
+        lam = lam + mu
+
     # Shape (batch_dims, 1)
     C1 = mu / 2
     # Shape (batch_dims, 1)
@@ -362,7 +372,7 @@ def _neohookean_energy(mu, lam, defo_grad):  # pragma: no cover
     return W
 
 
-def _neohookean_gradient(mu, lam, defo_grad):  # pragma: no cover
+def _neohookean_gradient(mu, lam, defo_grad, reparameterize_lame=True):  # pragma: no cover
     """Implements a batched version of the jacobian of neohookean elastic energy. Calculates gradients per-integration primitive. For more background information, refer to `Jernej Barbic's Siggraph Course Notes\
     <https://viterbi-web.usc.edu/~jbarbic/femdefo/sifakis-courseNotes-TheoryAndDiscretization.pdf>`_ section 3.2.
 
@@ -374,6 +384,10 @@ def _neohookean_gradient(mu, lam, defo_grad):  # pragma: no cover
     Returns:
         torch.Tensor: Vector of per-primitive jacobians of neohookean elastic energy w.r.t defo_grad values, of shape :math:`(\text{batch_dim}, 9)`
     """
+
+    if reparameterize_lame:
+        lam = lam + mu
+
     # Shape (batch_dims, 1)
     C1 = mu / 2
     # Shape (batch_dims, 1)

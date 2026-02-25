@@ -121,14 +121,17 @@ class SimplicitsRKPM(nn.Module):
         M = phi_x.T @ phi_x
         return M
     
-    def get_hessian_matrix(self, x, yms, prs):
+    def get_hessian_matrix(self, x, yms, prs, reparameterize_lame=True):
         grad_phi_x = self.rkpm.grad_phi(x)  # (n, N, D=3)
         n, N, D = grad_phi_x.shape
         J = grad_phi_x.permute(0, 2, 1).reshape(n * D, N)
         # assume the neohookean energy in wp.fem
         # scaling factor (\lambda + 4\mu)
         mus, lams = to_lame(yms, prs)
-        per_point_coeff = lams + 4 * mus
+        if reparameterize_lame:
+            per_point_coeff = lams + 4 * mus
+        else:
+            per_point_coeff = lams + 3 * mus
         per_dim_coeff = torch.kron(per_point_coeff.flatten(), torch.ones(D, device=x.device, dtype=x.dtype))
         H = J.T @ (per_dim_coeff[:, None] * J)
         return H
