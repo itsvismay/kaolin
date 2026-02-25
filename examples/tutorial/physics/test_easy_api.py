@@ -99,6 +99,18 @@ parser.add_argument(
     action="store_false",
     help="Disable dFdz computation from weights"
 )
+parser.add_argument(
+    "--apply-qr",
+    action="store_true",
+    default=True,
+    help="Apply QR decomposition to the B matrix (default: False)"
+)
+parser.add_argument(
+    "--no-apply-qr",
+    dest="apply_qr",
+    action="store_false",
+    help="Disable QR decomposition of the B matrix"
+)
 
 args = parser.parse_args()
 
@@ -229,6 +241,7 @@ obj_idx = scene.add_object(
     sim_obj,
     normalize_weights_by_samples=args.normalize_weights,
     dFdz_from_weights=args.dFdz_from_weights,
+    apply_qr=args.apply_qr,
     num_qp=2000,
 )
 
