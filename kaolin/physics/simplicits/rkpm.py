@@ -27,6 +27,32 @@ __all__ = [
 ]
 
 class SimplicitsRKPM(nn.Module):
+    r"""Simplicits skinning weights using Reproducing Kernel Particle Method (RKPM).
+
+    Computes skinning weights for Simplicits physics simulation using RKPM basis
+    functions. The skinning weights are derived from the eigenvectors of a
+    generalized eigenvalue problem involving the mass and elastic hessian matrices
+    assembled from RKPM kernel evaluations.
+
+    Args:
+        num_handles (int): Number of deformation handles (non-zero eigenvectors) to use.
+        num_nodes (int): Number of RKPM kernel nodes.
+        kernel_type (str, optional): Type of kernel function. Currently only
+            ``"gaussian"`` is supported. Defaults to ``"gaussian"``.
+        radius_scale (float, optional): Scaling factor applied to node radii
+            computed from nearest-neighbor distances. Defaults to 1.0.
+        radius_init_kNN (int, optional): Number of nearest neighbors used to
+            determine initial node radius. Defaults to 2.
+        radius_min (Union[float, str, None], optional): Minimum node radius.
+            Can be a float value, or a string of the form ``"Nx"`` (e.g.
+            ``"3x"``) to set the minimum as a multiple of the mean
+            nearest-neighbor distance among input points. Defaults to ``"3x"``.
+        num_points (int, optional): Number of integration sample points for
+            eigenanalysis. If None, all input points are used. Defaults to None.
+        use_double (bool, optional): Whether to force double precision for all
+            RKPM computations. Defaults to True.
+    """
+
     def __init__(
         self,
         num_handles: int,
@@ -60,6 +86,20 @@ class SimplicitsRKPM(nn.Module):
 
 
     def init(self, pts, yms, prs, rhos, appx_vol):
+        r"""Initializes the RKPM nodes and eigenvectors from input point cloud data.
+
+        Selects RKPM kernel nodes via Farthest Point Sampling, computes node
+        radii from nearest-neighbor distances, and performs a generalized
+        eigenanalysis on the mass and stiffness matrices to determine the
+        deformation modes.
+
+        Args:
+            pts (torch.Tensor): Input points of shape :math:`(N, 3)`.
+            yms (torch.Tensor): Young's moduli of shape :math:`(N,)`.
+            prs (torch.Tensor): Poisson's ratios of shape :math:`(N,)`.
+            rhos (torch.Tensor): Densities of shape :math:`(N,)`.
+            appx_vol (float): Approximate volume of the object.
+        """
         # currently assume all integration samples have equal volume weights = appx_vol / num_points, weights cancelled out
         
         # Use Farthest Point Sampling to determine nodes        
@@ -117,18 +157,48 @@ class SimplicitsRKPM(nn.Module):
         self.evecs.data.copy_(evecs[:, 1:])
 
     def get_mass_matrix(self, x):
+        r"""Computes the RKPM mass matrix.
+
+        The mass matrix is :math:`M = \Phi^T \Phi`, where :math:`\Phi` is the
+        matrix of RKPM kernel evaluations at the sample points.
+
+        Args:
+            x (torch.Tensor): Sample points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Mass matrix of shape :math:`(N, N)`, where :math:`N`
+            is the number of RKPM nodes.
+        """
         phi_x = self.rkpm.phi(x)
         M = phi_x.T @ phi_x
         return M
     
     def get_hessian_matrix(self, x, yms, prs, reparameterize_lame=True):
+        r"""Computes the RKPM stiffness (Hessian) matrix.
+
+        The stiffness matrix is assembled from spatial gradients of the RKPM
+        basis functions, scaled by per-point elastic material coefficients
+        derived from Young's modulus and Poisson's ratio.
+
+        Args:
+            x (torch.Tensor): Sample points of shape :math:`(n, 3)`.
+            yms (torch.Tensor): Young's moduli at sample points of shape :math:`(n,)`.
+            prs (torch.Tensor): Poisson's ratios at sample points of shape :math:`(n,)`.
+            reparameterize_lame (bool, optional): If True, scales by
+                :math:`\lambda + 4\mu` (for Neo-Hookean energy whose lame coefficients are reparameterized).
+                If False, scales by :math:`\lambda + 3\mu`. Defaults to True.
+
+        Returns:
+            torch.Tensor: Stiffness matrix of shape :math:`(N, N)`, where
+            :math:`N` is the number of RKPM nodes.
+        """
         grad_phi_x = self.rkpm.grad_phi(x)  # (n, N, D=3)
         n, N, D = grad_phi_x.shape
         J = grad_phi_x.permute(0, 2, 1).reshape(n * D, N)
-        # assume the neohookean energy in wp.fem
-        # scaling factor (\lambda + 4\mu)
+        # assume the stable neohookean energy
         mus, lams = to_lame(yms, prs)
         if reparameterize_lame:
+            # scaling factor (\lambda + 4\mu)
             per_point_coeff = lams + 4 * mus
         else:
             per_point_coeff = lams + 3 * mus
@@ -137,12 +207,30 @@ class SimplicitsRKPM(nn.Module):
         return H
 
     def forward(self, x):
+        r"""Evaluates RKPM skinning weights at query points.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Skinning weights of shape :math:`(n, C)`, where
+            :math:`C` is the number of handles.
+        """
         dtype = x.dtype
         if self.use_double:
             x = x.to(dtype=torch.float64)
         return self.rkpm(x, self.evecs).to(dtype=dtype)
-    
+
     def grad(self, x):
+        r"""Computes spatial gradients of RKPM skinning weights at query points.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Skinning weight gradients of shape :math:`(n, C, 3)`,
+            where :math:`C` is the number of handles.
+        """
         dtype = x.dtype
         if self.use_double:
             x = x.to(dtype=torch.float64)
@@ -152,6 +240,22 @@ class SimplicitsRKPM(nn.Module):
 
 
 class RKPM(nn.Module):
+    r"""Reproducing Kernel Particle Method (RKPM) function module.
+
+    Implements first-order RKPM functions with consistency correction,
+    allowing kernel-based interpolation over scattered point data. The corrected
+    kernel :math:`\phi_I(x)` satisfies polynomial completeness up to the
+    specified polynomial degree.
+
+    Args:
+        num_nodes (int): Number of kernel nodes.
+        kernel_type (str, optional): Type of base kernel function. Currently
+            only ``"gaussian"`` is supported. Defaults to ``"gaussian"``.
+        polynomial_degree (int, optional): Degree of polynomial basis used for
+            consistency correction. Currently only degree 1 is supported.
+            Defaults to 1.
+    """
+
     def __init__(
         self,
         num_nodes: int,
@@ -173,11 +277,26 @@ class RKPM(nn.Module):
         self.radius.requires_grad = False
 
     def set_kernels(self, nodes, radius):
+        r"""Sets the node positions and radii for the RKPM kernels.
+
+        Args:
+            nodes (torch.Tensor): Node positions of shape :math:`(N, 3)`.
+            radius (torch.Tensor): Per-node kernel radii of shape :math:`(N,)`.
+        """
         self.nodes.data.copy_(nodes)
         self.radius.data.copy_(radius)
         self.initialized = True
 
     def func_r(self, r):
+        r"""Evaluates the uncorrected radial basis kernel as a function of distance.
+
+        Args:
+            r (torch.Tensor): Distances from query points to nodes of shape
+                :math:`(n, N)`.
+
+        Returns:
+            torch.Tensor: Kernel values of shape :math:`(n, N)`.
+        """
         # uncorrected RBF kernel, as a function of radius
         if self.kernel_type == "gaussian":
             return torch.exp(-(r / self.radius) ** 2)
@@ -185,17 +304,44 @@ class RKPM(nn.Module):
             raise ValueError("Unknown kernel type")
     
     def func_x(self, x):
+        r"""Evaluates the uncorrected radial basis kernel at input locations.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Kernel values of shape :math:`(n, N)`.
+        """
         # uncorrected RBF kernel, as a function of input location
         r = torch.linalg.norm(x[:, None, :] - self.nodes[None, :, :], dim=-1)
         return self.func_r(r)
     
     def dfunc_dx(self, x):
+        r"""Computes the spatial gradient of the uncorrected radial basis kernel.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Kernel gradients of shape :math:`(n, N, 3)`.
+        """
         # derivative of uncorrected RBF kernel, as a function of input location
         displacement = x[:, None, :] - self.nodes[None, :, :]
         func_x = self.func_x(x)
         return func_x[..., None] * (-2 / self.radius[None, :, None] ** 2) * displacement
 
     def polynomial(self, x):
+        r"""Evaluates the polynomial basis at input locations.
+
+        For degree 1, returns :math:`[1, x, y, z]` for each point.
+
+        Args:
+            x (torch.Tensor): Input points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Polynomial basis values of shape :math:`(n, P)`,
+            where :math:`P` is the number of polynomial terms.
+        """
         if self.polynomial_degree == 1:
             return torch.cat([torch.ones(x.shape[0], 1, device=x.device, dtype=x.dtype), x], dim=-1)
         else:
@@ -203,6 +349,13 @@ class RKPM(nn.Module):
 
     @property
     def P(self):
+        r"""Number of polynomial basis terms.
+
+        For degree 1 in 3D, returns 4 (one constant term plus three linear terms).
+
+        Returns:
+            int: Number of polynomial terms.
+        """
         # number of polynomial terms
         if self.polynomial_degree == 1:
             # [1, x, y, z] for the first order
@@ -211,6 +364,17 @@ class RKPM(nn.Module):
             raise ValueError("Unknown polynomial degree")
     
     def grad_polynomial(self, x):
+        r"""Computes spatial gradients of the polynomial basis.
+
+        For degree 1, the gradient of :math:`[1, x, y, z]` with respect to
+        position is :math:`[0, I_{3 \times 3}]`.
+
+        Args:
+            x (torch.Tensor): Input points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Polynomial basis gradients of shape :math:`(n, P, 3)`.
+        """
         if self.polynomial_degree == 1:
             # Px = [1, x], so dPx/dx = [0, I]
             dPx_dx = torch.zeros(x.shape[0], self.P, self.num_dims, device=x.device, dtype=x.dtype)
@@ -220,6 +384,18 @@ class RKPM(nn.Module):
         return dPx_dx
 
     def phi(self, x):
+        r"""Evaluates the corrected RKPM basis functions at query points.
+
+        The corrected basis satisfies polynomial completeness, ensuring that
+        the interpolation can exactly reproduce polynomials up to the specified
+        degree.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Corrected kernel weights of shape :math:`(n, N)`.
+        """
         # corrected RKPM kernel function, weights for each node value
         func_x = self.func_x(x)
         Pn = self.polynomial(self.nodes)  # (N, P)
@@ -231,6 +407,15 @@ class RKPM(nn.Module):
         return phi_x
 
     def grad_phi(self, x):
+        r"""Computes spatial gradients of the corrected RKPM basis functions.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+
+        Returns:
+            torch.Tensor: Gradients of corrected kernel weights of shape
+            :math:`(n, N, 3)`.
+        """
         dfunc_dx = self.dfunc_dx(x)  # (n, N, D)
         func_x = self.func_x(x)  # (n, N)
         
@@ -266,6 +451,15 @@ class RKPM(nn.Module):
         return grad_phi_x
 
     def forward(self, x, c):
+        r"""Evaluates the RKPM interpolation of node values at query points.
+
+        Args:
+            x (torch.Tensor): Query points of shape :math:`(n, 3)`.
+            c (torch.Tensor): Node values of shape :math:`(N, C)`.
+
+        Returns:
+            torch.Tensor: Interpolated values of shape :math:`(n, C)`.
+        """
         if not self.initialized:
             raise ValueError("RKPM not initialized.")
         return self.phi(x) @ c
