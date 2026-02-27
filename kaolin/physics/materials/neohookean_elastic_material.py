@@ -233,6 +233,9 @@ class NeohookeanElasticMaterial:
             mu (wp.array(dtype=wp.float32)): Lame coefficient mu
             lam (wp.array(dtype=wp.float32)): Lame coefficient lambda
             integration_pt_volume (wp.array(dtype=wp.float32)): Volume distributed across each point
+            reparameterize_lame (bool): Whether to reparameterize the lame coefficients. If true,
+                the Lame Coefficients for Neo-Hookean energy are reparametrized so that they match
+                linear elasticity when linearied. See `Stable Neo-Hookean Flesh Simulation` for details.
         """
 
         self.reparameterize_lame = reparameterize_lame
