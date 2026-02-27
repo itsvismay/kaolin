@@ -243,6 +243,8 @@ obj_idx = scene.add_object(
     dFdz_from_weights=args.dFdz_from_weights,
     apply_qr=args.apply_qr,
     num_qp=2000,
+    # init_transform=torch.tensor([[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 0.0], [0, 0, 0, 1]], device='cuda')
+    init_transform=torch.tensor([[0, -1, 0, 0.0], [1, 0, 0, 0.0], [0, 0, 1, 0.0], [0, 0, 0, 1]], device='cuda')
 )
 
 # Set gravity and floor forces
@@ -293,6 +295,10 @@ if args.visualize:
         logger.info(f"Running simulation headless for {args.headless_steps} steps...")
         scene.reset_scene()
         initial_vertices = scene.get_object_deformed_pts(obj_idx, orig_vertices).clone()
+
+        # scene.set_object_initial_transform(obj_idx, torch.eye(4, device='cuda'))
+        # initial_vertices_2 = scene.get_object_deformed_pts(obj_idx, orig_vertices).clone()
+        # import pdb; pdb.set_trace()
 
         for step in range(args.headless_steps):
             scene.run_sim_step()
