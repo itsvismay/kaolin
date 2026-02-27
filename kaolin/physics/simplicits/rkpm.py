@@ -81,7 +81,8 @@ class SimplicitsRKPM(nn.Module):
             self.rkpm.double()
 
         # eigenvectors
-        self.evecs = nn.Parameter(torch.zeros(num_nodes, num_handles, dtype=torch.float64 if use_double else torch.float32))
+        evecs = nn.Parameter(torch.zeros(self.num_nodes, self.num_handles, dtype=torch.float64 if self.use_double else torch.float32))
+        self.register_parameter("evecs", evecs)
         self.evecs.requires_grad = False
 
 
@@ -106,7 +107,11 @@ class SimplicitsRKPM(nn.Module):
         device = pts.device
         if pts.shape[0] < self.num_nodes:
             print("WARNING: num_nodes is less than the number of points. Using all points as nodes.")
-            node_indices = torch.arange(pts.shape[0], device)
+            self.num_nodes = pts.shape[0]
+            node_indices = torch.arange(0, pts.shape[0], device=device)
+            evecs = nn.Parameter(torch.zeros(self.num_nodes, self.num_handles, dtype=torch.float64 if self.use_double else torch.float32, device=self.evecs.device))
+            self.register_parameter("evecs", evecs)
+            self.evecs.requires_grad = False
         else:
             node_indices = farthest_point_sampling(pts[None], self.num_nodes).squeeze(0)
         
@@ -283,8 +288,15 @@ class RKPM(nn.Module):
             nodes (torch.Tensor): Node positions of shape :math:`(N, 3)`.
             radius (torch.Tensor): Per-node kernel radii of shape :math:`(N,)`.
         """
-        self.nodes.data.copy_(nodes)
-        self.radius.data.copy_(radius)
+        if self.nodes.shape != nodes.shape:
+            self.register_parameter("nodes", torch.nn.Parameter(nodes.to(dtype=self.nodes.dtype, device=self.nodes.device)))
+            self.nodes.requires_grad = False
+            self.register_parameter("radius", torch.nn.Parameter(radius.to(dtype=self.radius.dtype, device=self.radius.device)))
+            self.radius.requires_grad = False
+            self.num_nodes = nodes.shape[0]
+        else:
+            self.nodes.data.copy_(nodes)
+            self.radius.data.copy_(radius)
         self.initialized = True
 
     def func_r(self, r):
