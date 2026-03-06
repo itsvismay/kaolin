@@ -151,7 +151,6 @@ def newtons_method(x,
     # Get the kinematic dofs
     t_x_kinematic = wp.to_torch(x) - wp.to_torch(_red_to_full(P, _full_to_red(Pt, x))) # x - P @ Pt @ x
 
-    # logger.debug(f"-------------------------------- Starting Newton's method --------------------------------")
     converged = False
     for k in range(nm_max_iters):
         E_curr = energy_fcn(x)  # scalar

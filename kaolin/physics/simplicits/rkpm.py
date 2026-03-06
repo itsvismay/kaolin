@@ -34,6 +34,8 @@ class SimplicitsRKPM(nn.Module):
     generalized eigenvalue problem involving the mass and elastic hessian matrices
     assembled from RKPM kernel evaluations.
 
+    Project link: https://research.nvidia.com/labs/sil/projects/freeform
+
     Args:
         num_handles (int): Number of deformation handles (non-zero eigenvectors) to use.
         num_nodes (int): Number of RKPM kernel nodes.
