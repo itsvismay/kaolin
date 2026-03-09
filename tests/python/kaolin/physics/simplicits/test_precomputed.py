@@ -19,8 +19,9 @@ import torch
 import warp as wp
 from functools import partial
 
-from kaolin.physics.simplicits.precomputed import lumped_mass_matrix, lbs_matrix, jacobian_dF_dz, _jacobian_dF_dz_const_handle, jacobian_dx_dz, sparse_lbs_matrix, sparse_dFdz_matrix_from_dense
+from kaolin.physics.simplicits.precomputed import lumped_mass_matrix, lbs_matrix, jacobian_dF_dz, _jacobian_dF_dz_const_handle, jacobian_dx_dz, sparse_lbs_matrix, sparse_dFdz_matrix_from_dense, sparse_dFdz_matrix
 from kaolin.physics.simplicits.network import SimplicitsMLP
+from kaolin.physics.simplicits.easy_api import SkinningWeightsFcn
 from kaolin.physics.utils.warp_utilities import _bsr_to_torch
 
 from kaolin.utils.testing import FLOAT_TYPES, with_seed, check_allclose
@@ -129,6 +130,39 @@ def test_sparse_lbs_matrix(device, dtype):
         # checking 3D point by 3D point, so flattening should be ok
 
     check_allclose(expected_points, transformed_points)
+
+
+@pytest.mark.parametrize('dtype', [torch.float])
+@with_seed(0, 0, 0)
+def test_dFdz_from_weights_matches_autodiff(dtype):
+    """sparse_dFdz_matrix (analytical) matches sparse_dFdz_matrix_from_dense (autodiff)."""
+    N = 20
+    H = 5
+    device = 'cpu'
+
+    points = torch.rand(N, 3, device=device, dtype=dtype)
+    model = SimplicitsMLP(3, 64, H, 6).to(device)
+    fcn = SkinningWeightsFcn(model)
+
+    # analytical path: sparse_dFdz_matrix takes enriched weights and their jacobian as numpy
+    weights = fcn(points)           # (N, H+1)
+    weights_jac = fcn.grad(points)  # (N, H+1, 3)
+    dFdz_analytical = _bsr_to_torch(
+        sparse_dFdz_matrix(
+            weights.detach().cpu().numpy(),
+            weights_jac.detach().cpu().numpy(),
+            points.detach().cpu().numpy(),
+        )
+    ).to_dense().to(device)
+
+    # autodiff path
+    dFdz_autodiff = _bsr_to_torch(
+        sparse_dFdz_matrix_from_dense(enriched_weights_fcn=fcn, pts=points)
+    ).to_dense().to(device)
+
+    max_diff = (dFdz_analytical - dFdz_autodiff).abs().max().item()
+    assert torch.allclose(dFdz_analytical, dFdz_autodiff, atol=2e-4), \
+        f"Max diff between analytical and autodiff dFdz: {max_diff}"
 
 @pytest.mark.parametrize('device', ['cuda', 'cpu'])
 @pytest.mark.parametrize('dtype', [torch.float])

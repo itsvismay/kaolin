@@ -20,6 +20,7 @@ import warp as wp
 import pytest
 import os
 import kaolin as kal
+from copy import deepcopy
 from kaolin.utils.testing import FLOAT_TYPES, with_seed, check_allclose
 
 from kaolin.physics.simplicits import SimplicitsObject, SimplicitsScene
@@ -806,3 +807,118 @@ class TestEasyAPISimplicitsScene:
         mean_dyn_y = dyn_pts[:, 1].mean()
         assert abs(
             mean_dyn_y - 5.0) < 1.0, f"Mean y coordinate of dynamic object {mean_dyn_y} is not within 1 unit of 5"
+
+
+class TestSimulatedObjectFlags:
+    """Unit tests for SimulatedObject flags: dFdz_from_weights, apply_qr, normalize_weights_by_samples."""
+
+    @pytest.fixture(autouse=True, scope='class')
+    def device(self):
+        return 'cuda'
+
+    @pytest.fixture(autouse=True, scope='class')
+    def dtype(self):
+        return torch.float
+
+    @pytest.fixture
+    @with_seed(0, 0, 0)
+    def small_beam_pts(self, device, dtype):
+        """Interior points sampled from the beam mesh for fast unit tests."""
+        mesh_file = os.path.dirname(os.path.realpath(
+            __file__)) + "/regression_test_data/beam_surf.obj"
+        mesh = kal.io.import_mesh(mesh_file, triangulate=True).to(device)
+        num_samples = 5000
+        uniform_pts = torch.rand(num_samples, 3, device=device) * (
+            mesh.vertices.max(dim=0).values - mesh.vertices.min(dim=0).values
+        ) + mesh.vertices.min(dim=0).values
+        boolean_signs = kal.ops.mesh.check_sign(
+            mesh.vertices.unsqueeze(0), mesh.faces,
+            uniform_pts.unsqueeze(0), hash_resolution=512)
+        pts = uniform_pts[boolean_signs.squeeze()]
+        yms = 1e5 * torch.ones(pts.shape[0], device=device, dtype=dtype)
+        prs = 0.45 * torch.ones(pts.shape[0], device=device, dtype=dtype)
+        rhos = 500 * torch.ones(pts.shape[0], device=device, dtype=dtype)
+        object_vol = (mesh.vertices.max(dim=0)[0] - mesh.vertices.min(dim=0)[0]).prod()
+        return pts, yms, prs, rhos, object_vol
+
+    @with_seed(0, 0, 0)
+    def test_apply_qr_deformed_pts_match(self, small_beam_pts, device, dtype):
+        """apply_qr=True and apply_qr=False give the same deformed points from random z."""
+        pts, yms, prs, rhos, object_vol = small_beam_pts
+
+        sim_obj_qr = SimplicitsObject.create_rkpm(
+            pts, yms, prs, rhos, object_vol,
+            num_handles=8, num_points=512, num_nodes=128, use_double=True)
+    
+        sim_obj_no_qr = deepcopy(sim_obj_qr)
+
+        scene = SimplicitsScene(device=device, dtype=dtype, timestep=0.05,
+                                     max_newton_steps=3, max_ls_steps=5)
+
+        # set the seed for consistent cubature points
+        torch.manual_seed(0)
+        scene.add_object(sim_obj_qr, num_qp=128,
+                               normalize_weights_by_samples=True, dFdz_from_weights=True, apply_qr=True)
+        torch.manual_seed(0)
+        scene.add_object(sim_obj_no_qr, num_qp=128,
+                               normalize_weights_by_samples=True, dFdz_from_weights=True, apply_qr=False)
+        scene._get_scene_ready_for_forces()
+
+        for _ in range(5):
+            # map z from qr space to non-qr space
+            z_qr_th = torch.randn(sim_obj_no_qr.num_handles * 12, device=device)
+            z_no_qr_th = scene.get_object(0).PmatRinv @ z_qr_th
+            z = wp.from_torch(torch.cat([z_qr_th.flatten(), z_no_qr_th.flatten()], dim=0), dtype=wp.float32)
+            scene.sim_z.assign(z)
+
+            deformed_norm = scene.get_object_deformed_pts(0)
+            deformed_no_norm = scene.get_object_deformed_pts(1)
+
+            assert torch.allclose(scene.get_object(0).sample_pts, scene.get_object(1).sample_pts), \
+                f"Two objects should have the same sample points: {scene.get_object(0).sample_pts} != {scene.get_object(1).sample_pts}"
+
+            assert torch.allclose(deformed_norm, deformed_no_norm, atol=1e-6), \
+                f"Max diff between normalized and unnormalized deformed points: {(deformed_norm - deformed_no_norm).abs().max().item()}"
+
+
+    @with_seed(0, 0, 0)
+    def test_normalize_weights_deformed_pts_match(self, small_beam_pts, device, dtype):
+        """normalize_weights_by_samples=True and normalize_weights_by_samples=False
+        give the same deformed points from random z."""
+        pts, yms, prs, rhos, object_vol = small_beam_pts
+
+        sim_obj_norm = SimplicitsObject.create_rkpm(
+            pts, yms, prs, rhos, object_vol,
+            num_handles=8, num_points=512, num_nodes=128, use_double=True)
+
+        sim_obj_no_norm = deepcopy(sim_obj_norm)
+        
+        scene = SimplicitsScene(device=device, dtype=dtype, timestep=0.05,
+                                     max_newton_steps=3, max_ls_steps=5)
+        # set the seed for consistent cubature points
+        torch.manual_seed(0)
+        scene.add_object(sim_obj_norm, num_qp=128,
+                               normalize_weights_by_samples=True, dFdz_from_weights=True)
+        torch.manual_seed(0)
+        scene.add_object(sim_obj_no_norm, num_qp=128,
+                               normalize_weights_by_samples=False, dFdz_from_weights=True)
+        scene._get_scene_ready_for_forces()
+
+        for _ in range(5):
+            # scale transform by weight norm is equivalent to normalize weights
+            z_norm_th = torch.randn(sim_obj_norm.num_handles, 12, device=device)
+            z_no_norm_th = z_norm_th.clone()
+            z_no_norm_th[:-1, :] /= scene.get_object(0).simplicits_object.skinning_weight_function.w_norm.view(-1, 1)
+            z_no_norm_th[-1, :] /= scene.get_object(0).simplicits_object.skinning_weight_function.one_norm
+            z = wp.from_torch(torch.cat([z_norm_th.flatten(), z_no_norm_th.flatten()], dim=0), dtype=wp.float32)
+            scene.sim_z.assign(z)
+
+            deformed_norm = scene.get_object_deformed_pts(0)
+            deformed_no_norm = scene.get_object_deformed_pts(1)
+
+            assert torch.allclose(scene.get_object(0).sample_pts, scene.get_object(1).sample_pts), \
+                f"Two objects should have the same sample points: {scene.get_object(0).sample_pts} != {scene.get_object(1).sample_pts}"
+
+            assert torch.allclose(deformed_norm, deformed_no_norm, atol=1e-6), \
+                f"Max diff between normalized and unnormalized deformed points: {(deformed_norm - deformed_no_norm).abs().max().item()}"
+
