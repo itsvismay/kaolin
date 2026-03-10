@@ -238,7 +238,6 @@ class NeohookeanElasticMaterial:
                 linear elasticity when linearied. See `Stable Neo-Hookean Flesh Simulation` for details.
         """
 
-        self.reparameterize_lame = reparameterize_lame
         if reparameterize_lame:
             lam = lam + mu
 

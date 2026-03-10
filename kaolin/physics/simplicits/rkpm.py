@@ -97,7 +97,8 @@ class SimplicitsRKPM(nn.Module):
         deformation modes.
 
         Args:
-            pts (torch.Tensor): Input points of shape :math:`(N, 3)`.
+            pts (torch.Tensor): Input points of shape :math:`(N, 3)`, which can be sampled from
+                a uniform grid within the object, or from a farthest point sampling of the object.
             yms (torch.Tensor): Young's moduli of shape :math:`(N,)`.
             prs (torch.Tensor): Poisson's ratios of shape :math:`(N,)`.
             rhos (torch.Tensor): Densities of shape :math:`(N,)`.

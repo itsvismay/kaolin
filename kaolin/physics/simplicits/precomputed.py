@@ -114,11 +114,11 @@ def _get_collision_jacobian_triplets_wp_kernel(
 
 @wp.kernel
 def _get_dFdz_triplets_wp_kernel(sim_weights: wp.array2d(dtype=wp.float32),
-                        sim_weights_jac: wp.array3d(dtype=wp.float32),
-                        sim_pts: wp.array(dtype=wp.vec3),
-                        rows: wp.array(dtype=wp.int32),
-                        cols: wp.array(dtype=wp.int32),
-                        vals: wp.array(dtype=wp.float32),
+                                 sim_weights_jac: wp.array3d(dtype=wp.float32),
+                                 sim_pts: wp.array(dtype=wp.vec3),
+                                 rows: wp.array(dtype=wp.int32),
+                                 cols: wp.array(dtype=wp.int32),
+                                 vals: wp.array(dtype=wp.float32),
                                  triplet_index: wp.array(dtype=wp.int32)):  # pragma: no cover
 
     # Get thread index
@@ -275,12 +275,13 @@ def sparse_dFdz_matrix(sim_weights: np.ndarray, sim_weights_jac: np.ndarray, sim
     Args:
         sim_weights (array, shape (num_samples, num_handles)): Skinning weights.
         sim_weights_jac (array, shape (num_samples, num_handles, 3)): Gradient of the skinning weights with respect to the sample points.
+        sim_pts (array, shape (num_samples, 3)): 3D positions of the sample points.
 
     Returns:
         wp.sparse.bsr_matrix: Sparse Jacobian matrix of size :math:`(9 \text{num_samples}, 12 \text{num_handles})`
     """
-    # TODO: UNUSED - only works for constant weights.
-    # Debug if the dFdz_from_dense is becoming slow or remove this function.
+
+    assert sim_weights.shape == sim_weights_jac.shape[:2] and sim_weights_jac.shape[2] == 3
 
     num_samples = sim_weights.shape[0]
     num_handles = sim_weights.shape[1]
