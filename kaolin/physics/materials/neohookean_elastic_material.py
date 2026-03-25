@@ -227,7 +227,7 @@ class NeohookeanElasticMaterial:
                  mu,
                  lam,
                  integration_pt_volume,
-                 reparameterize_lame=True):
+                 reparameterize_lame=False):
         r""" Initializes a NeohookeanElasticMaterial object.
         Args:
             mu (wp.array(dtype=wp.float32)): Lame coefficient mu
@@ -328,7 +328,7 @@ class NeohookeanElasticMaterial:
         return self.hessians_blocks
 
 
-def _neohookean_energy(mu, lam, defo_grad, reparameterize_lame=True):  # pragma: no cover
+def _neohookean_energy(mu, lam, defo_grad, reparameterize_lame=False):  # pragma: no cover
     r"""Implements a version of neohookean energy. Calculate energy per-integration primitive. For more background information, refer to `Ted Kim's Siggraph Course Notes\
     <https://www.tkim.graphics/DYNAMIC_DEFORMABLES/>`_
 
@@ -374,7 +374,7 @@ def _neohookean_energy(mu, lam, defo_grad, reparameterize_lame=True):  # pragma:
     return W
 
 
-def _neohookean_gradient(mu, lam, defo_grad, reparameterize_lame=True):  # pragma: no cover
+def _neohookean_gradient(mu, lam, defo_grad, reparameterize_lame=False):  # pragma: no cover
     """Implements a batched version of the jacobian of neohookean elastic energy. Calculates gradients per-integration primitive. For more background information, refer to `Jernej Barbic's Siggraph Course Notes\
     <https://viterbi-web.usc.edu/~jbarbic/femdefo/sifakis-courseNotes-TheoryAndDiscretization.pdf>`_ section 3.2.
 

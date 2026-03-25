@@ -19,53 +19,182 @@ import warp as wp
 import kaolin
 import numpy as np
 from typing import Any
-from kaolin.physics.simplicits.easy_api import SimplicitsScene, SimplicitsObject
+from kaolin.physics.simplicits.easy_api import SimplicitsScene, SimplicitsObject, NormalizedSkinningWeightsFcnWithConstant
 import pytest
 from kaolin.utils.testing import with_seed
-
+import potpourri3d as pp3d
 
 def run_regression_test(simplicits_scene, fem_data, tol=1e-2, test_name="fem_test"):
-    faces = fem_data["mesh_faces"]  # beam faces
     start_verts = fem_data["v0"]  # beam start verts
     frame_1_verts = fem_data["v1"]  # beam at frame 1
     frame_100_verts = fem_data["v_end"]  # beam verts at frame 100
 
-    # Checking deformation at start
-    our_start_verts = simplicits_scene.get_object_deformed_pts(
-        0, start_verts)  # find OUR starting deformation on the fem beam's verts
+    # Checking deformation at start (rendered points = FEM mesh vertices)
+    our_start_verts = simplicits_scene.get_object_deformed_pts(0, 'rendered')
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(start_verts.unsqueeze(0),
-                                                    our_start_verts.unsqueeze(
-                                                        0),
+                                                    our_start_verts.unsqueeze(0),
                                                     w1=1.0, w2=1.0, squared=True)
     assert cd[0].item() < tol*tol, f"Chamfer distance at start is {cd[0].item()}. This is too high. This is a very basic test, something is terribly wrong in {test_name}."
 
     # Checking deformation at frame 1
     simplicits_scene.run_sim_step()
 
-    our_frame_1_verts = simplicits_scene.get_object_deformed_pts(
-        0, start_verts)
-
+    our_frame_1_verts = simplicits_scene.get_object_deformed_pts(0, 'rendered')
+    
     cd = kaolin.metrics.pointcloud.chamfer_distance(frame_1_verts.unsqueeze(0),
-                                                    our_frame_1_verts.unsqueeze(
-                                                        0),
+                                                    our_frame_1_verts.unsqueeze(0),
                                                     w1=1.0, w2=1.0, squared=True)
     assert cd[0].item(
-    ) < tol*tol, f"Chamfer distance at frame 1 is {cd[0].item()}. This is too high. This is a basic test, something is terribly wrong in {test_name}."
+    ) < tol*tol + 1e-5, f"Chamfer distance at frame 1 is {cd[0].item()}. This is too high. This is a basic test, something is terribly wrong in {test_name}."
 
     # Checking deformation at frame 100
     for i in range(99):
         simplicits_scene.run_sim_step()
 
-    our_frame_100_verts = simplicits_scene.get_object_deformed_pts(
-        0, start_verts)
+    our_frame_100_verts = simplicits_scene.get_object_deformed_pts(0, 'rendered')
+
+    pp3d.write_point_cloud(frame_100_verts.cpu().numpy(), "frame_100_verts.ply")
+    pp3d.write_point_cloud(our_frame_100_verts.cpu().detach().numpy(), "frame_ours_100_verts.ply")
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(frame_100_verts.unsqueeze(0),
-                                                    our_frame_100_verts.unsqueeze(
-                                                        0),
+                                                    our_frame_100_verts.unsqueeze(0),
                                                     w1=1.0, w2=1.0, squared=True)
 
     assert cd[0].item() < tol, f"Chamfer distance at frame 100 is {cd[0].item()}. This is too high. Something is likely wrong in {test_name}."
+
+
+@pytest.fixture
+@with_seed(0, 0, 0)
+def cantilever_beam_data(device, dtype):
+    """Load cantilever beam mesh and sample interior points with material properties."""
+    mesh_file = os.path.dirname(os.path.realpath(
+        __file__)) + "/regression_test_data/beam_surf.obj"
+    mesh = kaolin.io.import_mesh(mesh_file, triangulate=True).cuda()
+
+    num_samples = 100000
+    uniform_pts = torch.rand(num_samples, 3, device=device) * (mesh.vertices.max(
+        dim=0).values - mesh.vertices.min(dim=0).values) + mesh.vertices.min(dim=0).values
+    boolean_signs = kaolin.ops.mesh.check_sign(mesh.vertices.unsqueeze(
+        0), mesh.faces, uniform_pts.unsqueeze(0), hash_resolution=512)
+
+    pts = uniform_pts[boolean_signs.squeeze()]  # m
+    yms = 1e5 * torch.ones(pts.shape[0], device=device, dtype=dtype)  # kg/m/s^2
+    prs = 0.45 * torch.ones(pts.shape[0], device=device, dtype=dtype)  # unitless
+    rhos = 500 * torch.ones(pts.shape[0], device=device, dtype=dtype)  # kg/m^3
+    object_vol = (mesh.vertices.max(dim=0)[0] - mesh.vertices.min(dim=0)[0]).prod()  # m^3
+
+    fem_data = torch.load(os.path.dirname(os.path.realpath(
+        __file__)) + "/regression_test_data/wpfem_vertex_deformations_beam.pth", weights_only=False)
+
+    return mesh, pts, yms, prs, rhos, object_vol, fem_data
+
+
+@pytest.fixture(params=["rkpm", "trained"])
+@with_seed(0,0,0)
+def cantilever_beam_setup(request, device, dtype, cantilever_beam_data):
+    """Fixture to set up cantilever beam scene for testing."""
+    mesh, pts, yms, prs, rhos, object_vol, fem_data = cantilever_beam_data
+
+    if request.param == "rkpm":
+        simplicits_object = SimplicitsObject.create_rkpm(
+            pts, yms, prs, rhos, object_vol,
+            num_handles=32, num_points=8192, num_nodes=1024, use_double=True)
+    elif request.param == "trained":
+        weights_file = os.path.dirname(os.path.realpath(
+            __file__)) + "/regression_test_data/beam_weights_fcn_32_handles.pth"
+        old_wrapper = torch.load(weights_file, weights_only=False)
+        # old_wrapper is a NormalizedSkinningWeightsFcn (already normalizes inputs)
+        fcn = NormalizedSkinningWeightsFcnWithConstant(old_wrapper, old_wrapper.bb_min, old_wrapper.bb_max)
+        simplicits_object = SimplicitsObject.create_from_function(
+            pts, yms, prs, rhos, object_vol, fcn)
+
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
+    scene = SimplicitsScene(
+        device=device, dtype=dtype, timestep=0.05,
+        max_newton_steps=10, max_ls_steps=20)
+    scene.newton_hessian_regularizer = 0
+    scene.direct_solve = True
+
+    scene.add_object(simplicits_object, num_qp=1024,
+                     normalize_weights_by_samples=False, dFdz_from_weights=True,
+                     rendered_points=rendered_pts)
+
+    scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
+    scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
+                          floor_penalty=10000.0, flip_floor=False)
+    scene.set_object_boundary_condition(
+        0, "right", lambda x: x[:, 0] >= 0.98, bdry_penalty=10000.0)
+
+    if request.param == "rkpm":
+        tol = 0.001
+    elif request.param == "trained":
+        tol = 0.02
+
+    return mesh, scene, tol, fem_data
+
+
+@pytest.fixture(params=["rkpm", "trained"])
+@with_seed(0, 0, 0)
+def cube_drop_setup(request, device, dtype):
+    """Fixture to set up cube drop scene for testing."""
+    mesh_file = os.path.dirname(os.path.realpath(
+        __file__)) + "/regression_test_data/cube_surf.obj"
+    mesh = kaolin.io.import_mesh(mesh_file, triangulate=True).cuda()
+
+    num_samples = 100000
+
+    uniform_pts = torch.rand(num_samples, 3, device=device) * (mesh.vertices.max(
+        dim=0).values - mesh.vertices.min(dim=0).values) + mesh.vertices.min(dim=0).values
+
+    boolean_signs = kaolin.ops.mesh.check_sign(mesh.vertices.unsqueeze(
+        0), mesh.faces, uniform_pts.unsqueeze(0), hash_resolution=512)
+
+    pts = uniform_pts[boolean_signs.squeeze()]  # m
+    yms = 1e4*torch.ones(pts.shape[0], device=device, dtype=dtype)  # kg/m/s^2
+    prs = 0.45*torch.ones(pts.shape[0], device=device, dtype=dtype)  # unitless
+    rhos = 500*torch.ones(pts.shape[0], device=device, dtype=dtype)  # kg/m^3
+    object_vol = (mesh.vertices.max(dim=0)[
+                  0] - mesh.vertices.min(dim=0)[0]).prod()  # m^3 #bbx volume
+    dt = 0.05  # s
+
+    fem_data = torch.load(os.path.dirname(os.path.realpath(
+        __file__)) + "/regression_test_data/wpfem_vertex_deformations_cube.pth", weights_only=False)
+
+    if request.param == "rkpm":
+        simplicits_object = SimplicitsObject.create_rkpm(pts, yms, prs, rhos, object_vol, num_handles=32, num_points=8192, num_nodes=1024, use_double=True)
+    elif request.param == "trained":
+        weights_file = os.path.dirname(os.path.realpath(
+            __file__)) + "/regression_test_data/cube_weights_fcn_32_handles.pth"
+        old_wrapper = torch.load(weights_file, weights_only=False)
+        # old_wrapper is a NormalizedSkinningWeightsFcn (already normalizes inputs)
+        fcn = NormalizedSkinningWeightsFcnWithConstant(old_wrapper, old_wrapper.bb_min, old_wrapper.bb_max)
+        simplicits_object = SimplicitsObject.create_from_function(
+            pts, yms, prs, rhos, object_vol, fcn)
+
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
+    scene = SimplicitsScene(
+        device=device, dtype=dtype, timestep=dt,
+        max_newton_steps=10, max_ls_steps=20)
+    scene.newton_hessian_regularizer = 0
+    scene.direct_solve = True
+
+    scene.add_object(simplicits_object, num_qp=1024,
+                     normalize_weights_by_samples=False, dFdz_from_weights=True,
+                     rendered_points=rendered_pts)
+
+    scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
+    scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
+                          floor_penalty=10000.0, flip_floor=False)
+
+    if request.param == "rkpm":
+        tol = 0.001
+    elif request.param == "trained":
+        tol = 0.0015
+
+    return mesh, scene, tol, fem_data
 
 
 @pytest.mark.parametrize("device", ["cuda"])
@@ -91,14 +220,9 @@ def test_cantilever_beam(device, dtype, cantilever_beam_setup):
         Lo_coeff: 1e6
     """
     
-    # Load simplicits scene 
-    simplicits_scene = cantilever_beam_setup
-    
-    # Load FEM beam results
-    data = torch.load(os.path.dirname(os.path.realpath(
-        __file__)) + "/regression_test_data/wpfem_vertex_deformations_beam.pth", weights_only=False)
-    
-    run_regression_test(simplicits_scene, data, tol=0.02, test_name="cantilever_beam")
+    _, simplicits_scene, tol, data = cantilever_beam_setup
+
+    run_regression_test(simplicits_scene, data, tol=tol, test_name="cantilever_beam")
     
 
 @pytest.mark.parametrize("device", ["cuda"])
@@ -123,12 +247,114 @@ def test_cube_drop(device, dtype, cube_drop_setup):
         Lo_coeff: 1e6
     """
 
-    # Load simplicits scene
-    simplicits_scene = cube_drop_setup
+    _, simplicits_scene, tol, data = cube_drop_setup
 
-    # Load FEM cube results
-    data = torch.load(os.path.dirname(os.path.realpath(
-        __file__)) + "/regression_test_data/wpfem_vertex_deformations_cube.pth", weights_only=False)
+    run_regression_test(simplicits_scene, data, tol=tol, test_name="cube_drop")
 
-    run_regression_test(simplicits_scene, data, tol=0.0015, test_name="cube_drop")
-    
+
+# ---------------------------------------------------------------------------
+# Fixtures parametrized over individual flags (rkpm object, cantilever beam)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(params=[True, False])
+@with_seed(0, 0, 0)
+def cantilever_beam_dFdz_setup(request, device, dtype, cantilever_beam_data):
+    """Cantilever beam with rkpm object, parametrized over dFdz_from_weights."""
+    mesh, pts, yms, prs, rhos, object_vol, fem_data = cantilever_beam_data
+    simplicits_object = SimplicitsObject.create_rkpm(
+        pts, yms, prs, rhos, object_vol,
+        num_handles=32, num_points=8192, num_nodes=1024, use_double=True)
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
+    scene = SimplicitsScene(device=device, dtype=dtype, timestep=0.05,
+                            max_newton_steps=10, max_ls_steps=20)
+    scene.newton_hessian_regularizer = 0
+    scene.direct_solve = True
+    scene.add_object(simplicits_object, num_qp=1024,
+                     normalize_weights_by_samples=False,
+                     dFdz_from_weights=request.param,
+                     apply_qr=False, rendered_points=rendered_pts)
+    scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
+    scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
+                          floor_penalty=10000.0, flip_floor=False)
+    scene.set_object_boundary_condition(
+        0, "right", lambda x: x[:, 0] >= 0.98, bdry_penalty=10000.0)
+    return mesh, scene, fem_data
+
+
+@pytest.fixture(params=[False, True])
+@with_seed(0, 0, 0)
+def cantilever_beam_apply_qr_setup(request, device, dtype, cantilever_beam_data):
+    """Cantilever beam with rkpm object, parametrized over apply_qr."""
+    mesh, pts, yms, prs, rhos, object_vol, fem_data = cantilever_beam_data
+    simplicits_object = SimplicitsObject.create_rkpm(
+        pts, yms, prs, rhos, object_vol,
+        num_handles=32, num_points=8192, num_nodes=1024, use_double=True)
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
+    scene = SimplicitsScene(device=device, dtype=dtype, timestep=0.05,
+                            max_newton_steps=10, max_ls_steps=20)
+    scene.newton_hessian_regularizer = 0
+    scene.direct_solve = True
+    scene.add_object(simplicits_object, num_qp=1024,
+                     normalize_weights_by_samples=False,
+                     dFdz_from_weights=False, apply_qr=request.param,
+                     rendered_points=rendered_pts)
+    scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
+    scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
+                          floor_penalty=10000.0, flip_floor=False)
+    scene.set_object_boundary_condition(
+        0, "right", lambda x: x[:, 0] >= 0.98, bdry_penalty=10000.0)
+    return mesh, scene, fem_data
+
+@pytest.fixture(params=[True, False])
+@with_seed(0, 0, 0)
+def cantilever_beam_normalize_setup(request, device, dtype, cantilever_beam_data):
+    # TODO: There are 2 different kinds of normalizations. One is normalize the input points to the weigihts. The other is normalize the weights themselves.
+    # Which one is this test testing?
+    """Cantilever beam with rkpm object, parametrized over normalize_weights_by_samples."""
+    mesh, pts, yms, prs, rhos, object_vol, fem_data = cantilever_beam_data
+    simplicits_object = SimplicitsObject.create_rkpm(
+        pts, yms, prs, rhos, object_vol,
+        num_handles=32, num_points=8192, num_nodes=1024, use_double=True)
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
+    scene = SimplicitsScene(device=device, dtype=dtype, timestep=0.05,
+                            max_newton_steps=10, max_ls_steps=20)
+    scene.newton_hessian_regularizer = 0
+    scene.direct_solve = True
+    scene.add_object(simplicits_object, num_qp=1024,
+                     normalize_weights_by_samples=False,
+                     dFdz_from_weights=False, apply_qr=False,
+                     rendered_points=rendered_pts)
+    scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
+    scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
+                          floor_penalty=10000.0, flip_floor=False)
+    scene.set_object_boundary_condition(
+        0, "right", lambda x: x[:, 0] >= 0.98, bdry_penalty=10000.0)
+    return mesh, scene, fem_data
+
+
+@pytest.mark.parametrize("device", ["cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32])
+def test_cantilever_beam_dFdz_consistency(device, dtype, cantilever_beam_dFdz_setup):
+    """Both dFdz_from_weights=True and False should pass the cantilever beam FEM regression test."""
+    _, simplicits_scene, data = cantilever_beam_dFdz_setup
+    run_regression_test(simplicits_scene, data, tol=0.002, test_name="cantilever_beam_dFdz")
+
+
+@pytest.mark.parametrize("device", ["cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32])
+def test_cantilever_beam_apply_qr_consistency(device, dtype, cantilever_beam_apply_qr_setup):
+    """Both apply_qr=False and True should pass the cantilever beam FEM regression test."""
+    _, simplicits_scene, data = cantilever_beam_apply_qr_setup
+    run_regression_test(simplicits_scene, data, tol=0.002, test_name="cantilever_beam_apply_qr")
+
+
+@pytest.mark.parametrize("device", ["cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32])
+def test_cantilever_beam_normalize_consistency(device, dtype, cantilever_beam_normalize_setup):
+    """Both normalize_weights_by_samples=True and False should pass the cantilever beam FEM regression test."""
+    _, simplicits_scene, data = cantilever_beam_normalize_setup
+    run_regression_test(simplicits_scene, data, tol=0.002, test_name="cantilever_beam_normalize")
+

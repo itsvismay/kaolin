@@ -45,7 +45,7 @@ class SimplicitsModelBuilder(newton.ModelBuilder):
         self._pending_collisions = None           # tuple of collision kwargs, or None
 
 
-    def add_simplicits_object(self, sim_object: SimplicitsObject, num_qp=1000, init_transform=None, is_kinematic=False):
+    def add_simplicits_object(self, sim_object: SimplicitsObject, num_qp=1000, init_transform=None, is_kinematic=False, rendered_points=None):
         r"""Add a Simplicits soft-body object to the model.
 
         Wraps SimplicitsScene.add_object() to add deformable objects to the simulation.
@@ -56,10 +56,10 @@ class SimplicitsModelBuilder(newton.ModelBuilder):
             init_transform (torch.Tensor or None): 3x4 or 4x4 tensor for the object's initial skinning transform.
                 Takes a standard transformation, not a delta; the identity matrix is subtracted and the delta is saved.
             is_kinematic (bool): If True, object is kinematic and not solved during dynamics.
+            rendered_points (SkinnedPointsProtocol or None): Optional pre-baked rendered points for visualization.
 
         """
-        # obj_id = self.model.simplicits_scene.add_object(sim_object, num_qp, init_transform, is_kinematic)
-        self._pending_objects.append((sim_object, num_qp, init_transform, is_kinematic))
+        self._pending_objects.append((sim_object, num_qp, init_transform, is_kinematic, rendered_points))
 
     def add_simplicits_collisions(self, collision_particle_radius=0.1,
                                         detection_ratio=1.5,
@@ -125,8 +125,8 @@ class SimplicitsModelBuilder(newton.ModelBuilder):
 
         model = SimplicitsModel(device)
 
-        for sim_object, num_qp, init_transform, is_kinematic in self._pending_objects:
-            obj_id = model.simplicits_scene.add_object(sim_object, num_qp, init_transform, is_kinematic)
+        for sim_object, num_qp, init_transform, is_kinematic, rendered_points in self._pending_objects:
+            obj_id = model.simplicits_scene.add_object(sim_object, num_qp, init_transform, is_kinematic, rendered_points=rendered_points)
             logging.info(f"Added Simplicits object with ID {obj_id}")
 
         has_simplicits_objects = len(self._pending_objects) > 0
@@ -169,7 +169,7 @@ class SimplicitsModelBuilder(newton.ModelBuilder):
 
             self.simplicits_particle_end = len(self.particle_q)
 
-        base_m = super().finalize(device, requires_grad)
+        base_m = super().finalize(device, requires_grad=requires_grad)
 
         # copy all attributes from base model
         model.__dict__.update(base_m.__dict__)

@@ -24,30 +24,25 @@ import pytest
 from kaolin.utils.testing import with_seed
 
 def run_regression_test(simplicits_scene, fem_data, tol=1e-2, test_name="fem_test"):
-    faces = fem_data["mesh_faces"]  # beam faces
     start_verts = fem_data["v0"]  # beam start verts
     frame_1_verts = fem_data["v1"]  # beam at frame 1
     frame_100_verts = fem_data["v_end"]  # beam verts at frame 100
 
-    # Checking deformation at start
-    our_start_verts = simplicits_scene.get_object_deformed_pts(
-        0, start_verts)  # find OUR starting deformation on the fem beam's verts
+    # Checking deformation at start (rendered points = FEM mesh vertices)
+    our_start_verts = simplicits_scene.get_object_deformed_pts(0, 'rendered')
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(start_verts.unsqueeze(0),
-                                                    our_start_verts.unsqueeze(
-                                                        0),
+                                                    our_start_verts.unsqueeze(0),
                                                     w1=1.0, w2=1.0, squared=True)
     assert cd[0].item() < tol*tol, f"Chamfer distance at start is {cd[0].item()}. This is too high. This is a very basic test, something is terribly wrong in {test_name}."
 
     # Checking deformation at frame 1
     simplicits_scene.run_sim_step()
 
-    our_frame_1_verts = simplicits_scene.get_object_deformed_pts(
-        0, start_verts)
+    our_frame_1_verts = simplicits_scene.get_object_deformed_pts(0, 'rendered')
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(frame_1_verts.unsqueeze(0),
-                                                    our_frame_1_verts.unsqueeze(
-                                                        0),
+                                                    our_frame_1_verts.unsqueeze(0),
                                                     w1=1.0, w2=1.0, squared=True)
     assert cd[0].item(
     ) < tol*tol, f"Chamfer distance at frame 1 is {cd[0].item()}. This is too high. This is a basic test, something is terribly wrong in {test_name}."
@@ -56,12 +51,10 @@ def run_regression_test(simplicits_scene, fem_data, tol=1e-2, test_name="fem_tes
     for i in range(99):
         simplicits_scene.run_sim_step()
 
-    our_frame_100_verts = simplicits_scene.get_object_deformed_pts(
-        0, start_verts)
+    our_frame_100_verts = simplicits_scene.get_object_deformed_pts(0, 'rendered')
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(frame_100_verts.unsqueeze(0),
-                                                    our_frame_100_verts.unsqueeze(
-                                                        0),
+                                                    our_frame_100_verts.unsqueeze(0),
                                                     w1=1.0, w2=1.0, squared=True)
 
     assert cd[0].item() < tol, f"Chamfer distance at frame 100 is {cd[0].item()}. This is too high. Something is likely wrong in {test_name}."
@@ -109,6 +102,11 @@ def cantilever_beam_scene_setup(device, dtype):
                                         normalize_for_training=True)
 
 
+    # Load FEM data to get reference vertices for rendered points
+    fem_data = torch.load(os.path.dirname(os.path.realpath(
+        __file__)) + "/regression_test_data/wpfem_vertex_deformations_beam.pth", weights_only=False)
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
     scene = SimplicitsScene(
         device=device,
         dtype=dtype,
@@ -118,8 +116,8 @@ def cantilever_beam_scene_setup(device, dtype):
     )
     scene.newton_hessian_regularizer = 0
     scene.direct_solve = True
-    
-    scene.add_object(simplicits_object, num_qp=1024)
+
+    scene.add_object(simplicits_object, num_qp=1024, rendered_points=rendered_pts)
 
     scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
     scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
@@ -128,7 +126,7 @@ def cantilever_beam_scene_setup(device, dtype):
     scene.set_object_boundary_condition(
         0, "right", lambda x: x[:, 0] >= 0.98, bdry_penalty=10000.0)
 
-    return mesh, scene
+    return mesh, scene, fem_data
 
 
 @pytest.mark.parametrize("device", ["cuda"])
@@ -154,11 +152,7 @@ def test_cantilever_beam_simulation(device, dtype):
         Lo_coeff: 1e6
     """
     
-    # Load simplicits scene 
-    _, simplicits_scene = cantilever_beam_scene_setup(device, dtype)
-    
-    # Load FEM beam results
-    data = torch.load(os.path.dirname(os.path.realpath(
-        __file__)) + "/regression_test_data/wpfem_vertex_deformations_beam.pth", weights_only=False)
-    
+    # Load simplicits scene (FEM data loaded inside fixture for rendered points)
+    _, simplicits_scene, data = cantilever_beam_scene_setup(device, dtype)
+
     run_regression_test(simplicits_scene, data, tol=0.02, test_name="cantilever_beam")

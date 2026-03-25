@@ -32,14 +32,13 @@ def run_regression_test(solver, model, tol=1e-2, test_name="fem_test"):
     p = Path(__file__).resolve().parent.parent.parent / "physics" / "simplicits" / "regression_test_data" / "wpfem_vertex_deformations_beam.pth"
     fem_data = torch.load(p, weights_only=False)
 
-    faces = fem_data["mesh_faces"]  # beam faces
-    start_verts = fem_data["v0"]  # beam start verts
-    frame_1_verts = fem_data["v1"]  # beam at frame 1
-    frame_100_verts = fem_data["v_end"]  # beam verts at frame 100
+    start_verts = fem_data["v0"]
+    frame_1_verts = fem_data["v1"]
+    frame_100_verts = fem_data["v_end"]
     dt = 0.05
 
     # Checking deformation at start
-    our_start_verts = model.simplicits_scene.get_object_deformed_pts(0, start_verts)  # find OUR starting deformation on the fem beam's verts
+    our_start_verts = model.simplicits_scene.get_object_deformed_pts(0, 'rendered')
     cd = kaolin.metrics.pointcloud.chamfer_distance(start_verts.unsqueeze(0),our_start_verts.unsqueeze(0), w1=1.0, w2=1.0, squared=True)
     assert cd[0].item() < tol*tol, f"Chamfer distance at start is {cd[0].item()}. This is too high. This is a very basic test, something is terribly wrong in {test_name}."
 
@@ -49,7 +48,7 @@ def run_regression_test(solver, model, tol=1e-2, test_name="fem_test"):
     solver.step(state_0, state_1, None, None, dt)
     state_1, state_0 = state_0, state_1
 
-    our_frame_1_verts = model.simplicits_scene.get_object_deformed_pts(0, start_verts)
+    our_frame_1_verts = model.simplicits_scene.get_object_deformed_pts(0, 'rendered')
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(frame_1_verts.unsqueeze(0), our_frame_1_verts.unsqueeze(0), w1=1.0, w2=1.0, squared=True)
     assert cd[0].item() < tol*tol, f"Chamfer distance at frame 1 is {cd[0].item()}. This is too high. This is a basic test, something is terribly wrong in {test_name}."
@@ -61,7 +60,7 @@ def run_regression_test(solver, model, tol=1e-2, test_name="fem_test"):
         solver.step(state_0, state_1, None, None, dt)
         state_1, state_0 = state_0, state_1
 
-    our_frame_100_verts = model.simplicits_scene.get_object_deformed_pts(0, start_verts)
+    our_frame_100_verts = model.simplicits_scene.get_object_deformed_pts(0, 'rendered')
 
 
     cd = kaolin.metrics.pointcloud.chamfer_distance(frame_100_verts.unsqueeze(0),
@@ -86,11 +85,16 @@ def test_solver_initialization(simplicits_object):
     assert solver is not None
 
 def test_solver_regression_cantilever_beam(cantilever_beam_object):
-    """Test that solver can be created."""
+    """Test that solver regression matches FEM reference."""
     simplicits_object = cantilever_beam_object
 
+    # Load FEM data and bake rendered points for comparison
+    p = Path(__file__).resolve().parent.parent.parent / "physics" / "simplicits" / "regression_test_data" / "wpfem_vertex_deformations_beam.pth"
+    fem_data = torch.load(p, weights_only=False)
+    rendered_pts = simplicits_object.bake_for_rendering(fem_data["v0"])
+
     builder = SimplicitsModelBuilder(up_axis=UP_AXIS)
-    builder.add_simplicits_object(simplicits_object, num_qp=1024)
+    builder.add_simplicits_object(simplicits_object, num_qp=1024, rendered_points=rendered_pts)
     builder.add_simplicits_object_boundary_condition(0, "right", lambda x: x[:, 0] >= 0.98, bdry_penalty=10000.0)
     model = builder.finalize()
     model.simplicits_scene.max_newton_steps = 10

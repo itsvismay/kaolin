@@ -235,7 +235,7 @@ class TestEasyAPISimplicitsObjectTraining:
         # Set pts, appx_vol, yms, prs, rhos to normalized values
         training_pts = normalized_pts
 
-        le, lo = kal.physics.simplicits.losses.compute_losses(sim_obj.skinning_weight_function.model,
+        le, lo = kal.physics.simplicits.losses.compute_losses(sim_obj.skinning_weight_function.model.model,
                                                             training_pts,
                                                             yms.unsqueeze(-1),
                                                             prs.unsqueeze(-1),
@@ -315,10 +315,11 @@ class TestEasyAPISimplicitsScene:
     @pytest.fixture(autouse=True)
     def scene_with_one_object(self, example_rigid_cube, device, dtype):
         scene = SimplicitsScene(device=device, dtype=dtype)
-        scene.add_object(example_rigid_cube,
+        scene.add_object(example_rigid_cube, num_qp=100,
                          init_transform=torch.tensor([[1, 0, 0, 0],
                                                       [0, 1, 0, 10],
-                                                      [0, 0, 1, 0]], device=device, dtype=dtype))
+                                                      [0, 0, 1, 0]], device=device, dtype=dtype),
+                                                      dFdz_from_weights=True)
         return scene
     
     def test_simplicits_object_create_rigid(self, example_rigid_cube):
@@ -329,9 +330,10 @@ class TestEasyAPISimplicitsScene:
         x0, x0_sdfval, yms, prs, rhos, appx_vol = example_unit_cube_object
 
         # Create object from skinning function that returns 2 weights for each point
+        # The wrapper adds a constant handle, so num_handles = 2 + 1 = 3
         object_from_function = SimplicitsObject.create_from_function(
             pts=x0, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol, fcn=lambda x: torch.ones((x.shape[0], 2), device=device, dtype=dtype))
-        assert object_from_function.num_handles == 2 
+        assert object_from_function.num_handles == 3
 
     def test_easy_api_scene_add_object_error_no_objects(self, example_rigid_cube, device, dtype):
         # Create
@@ -356,7 +358,7 @@ class TestEasyAPISimplicitsScene:
 
         # Check Error: Add object to scene with incorrect init transform
         with pytest.raises(ValueError):
-            scene.add_object(rigid_obj_one,
+            scene.add_object(rigid_obj_one, num_qp=100,
                              init_transform=torch.tensor([[1, 0, 0, 0],
                                                           [0, 1, 0, 0]], device=device, dtype=dtype))
         
@@ -370,17 +372,17 @@ class TestEasyAPISimplicitsScene:
         
        
         #Add objects to scene with correct init transforms
-        scene.add_object(rigid_obj_one,
+        scene.add_object(rigid_obj_one, num_qp=100,
                             init_transform=torch.tensor([[1, 0, 0, 0],
                                                         [0, 1, 0, 10],
                                                         [0, 0, 1, 0]], device=device, dtype=dtype))
-        
+
         scene.set_scene_gravity()
-        
+
         # Check error: Add object to scene after simulation has started
         scene.run_sim_step()
         with pytest.raises(RuntimeError):
-            scene.add_object(rigid_obj_two,
+            scene.add_object(rigid_obj_two, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     [0, 1, 0, 0],
                                                     [0, 0, 1, 0],
@@ -491,7 +493,7 @@ class TestEasyAPISimplicitsScene:
         scene = scene_with_one_object
         scene.timestep = 0.05
         scene.newton_hessian_regularizer = 1e-4
-        scene.add_object(example_rigid_cube,
+        scene.add_object(example_rigid_cube, num_qp=100,
                          init_transform=torch.tensor([[1, 0, 0, 0],
                                                       [0, 1, 0, 5],
                                                       [0, 0, 1, 0]], device=device, dtype=dtype))
@@ -515,7 +517,7 @@ class TestEasyAPISimplicitsScene:
         scene = scene_with_one_object
         scene.timestep = 0.01
         scene.newton_hessian_regularizer = 1e-5
-        scene.add_object(example_rigid_cube,
+        scene.add_object(example_rigid_cube, num_qp=100,
                          init_transform=torch.tensor([[1, 0, 0, 0],
                                                       [0, 1, 0, 5],
                                                       [0, 0, 1, 0]], device=device, dtype=dtype))
@@ -544,13 +546,13 @@ class TestEasyAPISimplicitsScene:
         # Create scene
         scene = SimplicitsScene(device=device, dtype=dtype)
         # Add object to scene
-        scene.add_object(rigid_obj_one,
+        scene.add_object(rigid_obj_one, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     # move object 10 units in y direction
                                                     [0, 1, 0, 10],
                                                     [0, 0, 1, 0],
                                                     [0, 0, 0, 1]], device=device, dtype=dtype))
-        scene.add_object(rigid_obj_two,
+        scene.add_object(rigid_obj_two, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     [0, 1, 0, 0],
                                                     [0, 0, 1, 0],
@@ -583,8 +585,8 @@ class TestEasyAPISimplicitsScene:
 
         transform = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 10], [0, 0, 1, 0], [0, 0, 0, 1]], device=device, dtype=dtype)
         # Add object to scene
-        id0 = scene.add_object(rigid_obj_one, init_transform=transform)
-        id1 =scene.add_object(rigid_obj_two, init_transform=transform)
+        id0 = scene.add_object(rigid_obj_one, num_qp=100, init_transform=transform)
+        id1 = scene.add_object(rigid_obj_two, num_qp=100, init_transform=transform)
 
         assert torch.allclose(scene.get_object_transforms(id0), scene.get_object_transforms(1))
         # Relative, not absolute
@@ -600,12 +602,12 @@ class TestEasyAPISimplicitsScene:
         # Create scene
         scene = SimplicitsScene(device=device, dtype=dtype)
         # Add object to scene
-        scene.add_object(rigid_obj_one,
+        scene.add_object(rigid_obj_one, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     [0, 1, 0, 10], # move object 10 units in y direction
                                                     [0, 0, 1, 0],
                                                     [0, 0, 0, 1]], device=device, dtype=dtype))
-        scene.add_object(rigid_obj_two,
+        scene.add_object(rigid_obj_two, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     [0, 1, 0, 0],
                                                     [0, 0, 1, 0],
@@ -617,7 +619,7 @@ class TestEasyAPISimplicitsScene:
         # Assert after setup that mean y coordinate is 10
         pts = scene.get_object_deformed_pts(0)
         expected_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
         assert torch.allclose(
             pts, expected_pts), f"Object is not at 0, 10, 0"
         
@@ -651,7 +653,7 @@ class TestEasyAPISimplicitsScene:
         
         pts = scene.get_object_deformed_pts(0)
         expected_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 0, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 0, 0], device=device, dtype=dtype).unsqueeze(0)
         assert torch.allclose(
             pts, expected_pts), f"Object is not set at 0, 0, 0"
         
@@ -671,25 +673,25 @@ class TestEasyAPISimplicitsScene:
         
         scene = SimplicitsScene(device=device, dtype=dtype)
         scene.timestep = 0.1
-        scene.add_object(rigid_obj_one, 
-                        init_transform=torch.tensor([[1, 0, 0, 0], 
-                                        [0, 1, 0, 10], 
-                                        [0, 0, 1, 0], 
+        scene.add_object(rigid_obj_one, num_qp=100,
+                        init_transform=torch.tensor([[1, 0, 0, 0],
+                                        [0, 1, 0, 10],
+                                        [0, 0, 1, 0],
                                         [0, 0, 0, 1]], device=device, dtype=dtype),
                             is_kinematic=True)
-        scene.add_object(rigid_obj_two,
+        scene.add_object(rigid_obj_two, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                     [0, 1, 0, 5],
                                     [0, 0, 1, 0],
                                     [0, 0, 0, 1]], device=device, dtype=dtype))
-        
+
         scene.set_scene_gravity()
         scene.set_scene_floor()
         
         # 2. assert after setup that mean y coordinate is 10
         kin_pts = scene.get_object_deformed_pts(0)
         expected_kin_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
         check_allclose(
             kin_pts, expected_kin_pts), f"Kinematic object is not at 0, 10, 0"
         
@@ -707,7 +709,7 @@ class TestEasyAPISimplicitsScene:
         # 4. assert that mean y coordinate of kinematic object is 10
         kin_pts = scene.get_object_deformed_pts(0)
         expected_kin_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
         check_allclose(
             kin_pts, expected_kin_pts), f"Kinematic object is not at 0, 10, 0"
         
@@ -724,7 +726,7 @@ class TestEasyAPISimplicitsScene:
         # 6. assert after that mean y coordinate of kinematic object is 1
         kin_pts = scene.get_object_deformed_pts(0)
         expected_kin_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 1, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 1, 0], device=device, dtype=dtype).unsqueeze(0)
         check_allclose(
             kin_pts, expected_kin_pts), f"Kinematic object is not at 0, 1, 0"
         
@@ -747,13 +749,13 @@ class TestEasyAPISimplicitsScene:
 
         scene = SimplicitsScene(device=device, dtype=dtype)
         scene.timestep = 0.1
-        scene.add_object(rigid_obj_one,
+        scene.add_object(rigid_obj_one, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     [0, 1, 0, 10],
                                                     [0, 0, 1, 0],
                                                     [0, 0, 0, 1]], device=device, dtype=dtype),
                         is_kinematic=True)
-        scene.add_object(rigid_obj_two,
+        scene.add_object(rigid_obj_two, num_qp=100,
                         init_transform=torch.tensor([[1, 0, 0, 0],
                                                     [0, 1, 0, 5],
                                                     [0, 0, 1, 0],
@@ -765,7 +767,7 @@ class TestEasyAPISimplicitsScene:
         # 2. assert after setup that mean y coordinate is 10
         kin_pts = scene.get_object_deformed_pts(0)
         mean_kin_y = kin_pts[:, 1].mean()
-        expected_kin_pts = scene.get_object(0).sample_pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
+        expected_kin_pts = scene.get_object(0).pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
         check_allclose(kin_pts, expected_kin_pts)
         
         dyn_pts = scene.get_object_deformed_pts(1)
@@ -783,7 +785,7 @@ class TestEasyAPISimplicitsScene:
         # 4. assert that mean y coordinate of kinematic object is 10
         kin_pts = scene.get_object_deformed_pts(0)
         expected_kin_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 10, 0], device=device, dtype=dtype).unsqueeze(0)
         check_allclose(
             kin_pts, expected_kin_pts), f"Kinematic object is not at 0, 10, 0"
         dyn_pts = scene.get_object_deformed_pts(1)
@@ -801,7 +803,7 @@ class TestEasyAPISimplicitsScene:
         # 7. assert dynamic object is at 0, 5, 0, kinematic object is at 0, 1, 0
         kin_pts = scene.get_object_deformed_pts(0)
         expected_kin_pts = scene.get_object(
-            0).sample_pts + torch.tensor([0, 1, 0], device=device, dtype=dtype).unsqueeze(0)
+            0).pts + torch.tensor([0, 1, 0], device=device, dtype=dtype).unsqueeze(0)
         check_allclose(kin_pts, expected_kin_pts), f"Kinematic object is not at 0, 1, 0"
         dyn_pts = scene.get_object_deformed_pts(1)
         mean_dyn_y = dyn_pts[:, 1].mean()
@@ -858,10 +860,10 @@ class TestSimulatedObjectFlags:
         # set the seed for consistent cubature points
         torch.manual_seed(0)
         scene.add_object(sim_obj_qr, num_qp=128,
-                               normalize_weights_by_samples=True, dFdz_from_weights=True, apply_qr=True)
+                               normalize_weights_by_samples=False, dFdz_from_weights=True, apply_qr=True)
         torch.manual_seed(0)
         scene.add_object(sim_obj_no_qr, num_qp=128,
-                               normalize_weights_by_samples=True, dFdz_from_weights=True, apply_qr=False)
+                               normalize_weights_by_samples=False, dFdz_from_weights=True, apply_qr=False)
         scene._get_scene_ready_for_forces()
 
         for _ in range(5):
@@ -874,8 +876,8 @@ class TestSimulatedObjectFlags:
             deformed_norm = scene.get_object_deformed_pts(0)
             deformed_no_norm = scene.get_object_deformed_pts(1)
 
-            assert torch.allclose(scene.get_object(0).sample_pts, scene.get_object(1).sample_pts), \
-                f"Two objects should have the same sample points: {scene.get_object(0).sample_pts} != {scene.get_object(1).sample_pts}"
+            assert torch.allclose(scene.get_object(0).pts, scene.get_object(1).pts), \
+                f"Two objects should have the same sample points: {scene.get_object(0).pts} != {scene.get_object(1).pts}"
 
             assert torch.allclose(deformed_norm, deformed_no_norm, atol=1e-6), \
                 f"Max diff between normalized and unnormalized deformed points: {(deformed_norm - deformed_no_norm).abs().max().item()}"
@@ -898,7 +900,7 @@ class TestSimulatedObjectFlags:
         # set the seed for consistent cubature points
         torch.manual_seed(0)
         scene.add_object(sim_obj_norm, num_qp=128,
-                               normalize_weights_by_samples=True, dFdz_from_weights=True)
+                               normalize_weights_by_samples=False, dFdz_from_weights=True)
         torch.manual_seed(0)
         scene.add_object(sim_obj_no_norm, num_qp=128,
                                normalize_weights_by_samples=False, dFdz_from_weights=True)
@@ -908,16 +910,16 @@ class TestSimulatedObjectFlags:
             # scale transform by weight norm is equivalent to normalize weights
             z_norm_th = torch.randn(sim_obj_norm.num_handles, 12, device=device)
             z_no_norm_th = z_norm_th.clone()
-            z_no_norm_th[:-1, :] /= scene.get_object(0).simplicits_object.skinning_weight_function.w_norm.view(-1, 1)
-            z_no_norm_th[-1, :] /= scene.get_object(0).simplicits_object.skinning_weight_function.one_norm
+            z_no_norm_th[:-1, :] /= scene.get_object(0).skinning_weight_function.w_norm.view(-1, 1)
+            z_no_norm_th[-1, :] /= scene.get_object(0).skinning_weight_function.one_norm
             z = wp.from_torch(torch.cat([z_norm_th.flatten(), z_no_norm_th.flatten()], dim=0), dtype=wp.float32)
             scene.sim_z.assign(z)
 
             deformed_norm = scene.get_object_deformed_pts(0)
             deformed_no_norm = scene.get_object_deformed_pts(1)
 
-            assert torch.allclose(scene.get_object(0).sample_pts, scene.get_object(1).sample_pts), \
-                f"Two objects should have the same sample points: {scene.get_object(0).sample_pts} != {scene.get_object(1).sample_pts}"
+            assert torch.allclose(scene.get_object(0).pts, scene.get_object(1).pts), \
+                f"Two objects should have the same sample points: {scene.get_object(0).pts} != {scene.get_object(1).pts}"
 
             assert torch.allclose(deformed_norm, deformed_no_norm, atol=1e-6), \
                 f"Max diff between normalized and unnormalized deformed points: {(deformed_norm - deformed_no_norm).abs().max().item()}"

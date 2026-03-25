@@ -21,7 +21,7 @@ from functools import partial
 
 from kaolin.physics.simplicits.precomputed import lumped_mass_matrix, lbs_matrix, jacobian_dF_dz, _jacobian_dF_dz_const_handle, jacobian_dx_dz, sparse_lbs_matrix, sparse_dFdz_matrix_from_dense, sparse_dFdz_matrix
 from kaolin.physics.simplicits.network import SimplicitsMLP
-from kaolin.physics.simplicits.easy_api import SkinningWeightsFcn
+from kaolin.physics.simplicits.easy_api import NormalizedSkinningWeightsFcn, NormalizedSkinningWeightsFcnWithConstant
 from kaolin.physics.utils.warp_utilities import _bsr_to_torch
 
 from kaolin.utils.testing import FLOAT_TYPES, with_seed, check_allclose
@@ -142,7 +142,10 @@ def test_dFdz_from_weights_matches_autodiff(dtype):
 
     points = torch.rand(N, 3, device=device, dtype=dtype)
     model = SimplicitsMLP(3, 64, H, 6).to(device)
-    fcn = SkinningWeightsFcn(model)
+    bb_min = points.min(dim=0).values
+    bb_max = points.max(dim=0).values
+    normalized_model = NormalizedSkinningWeightsFcn(model, bb_min, bb_max)
+    fcn = NormalizedSkinningWeightsFcnWithConstant(normalized_model, bb_min, bb_max)
 
     # analytical path: sparse_dFdz_matrix takes enriched weights and their jacobian as numpy
     weights = fcn(points)           # (N, H+1)

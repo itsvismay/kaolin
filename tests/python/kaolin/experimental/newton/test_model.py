@@ -41,7 +41,7 @@ def test_sim_z_dot_to_full_uninitialized():
 
 def test_sim_z_to_full_shape(simplicits_object):
     model = SimplicitsModel()
-    model.simplicits_scene.add_object(simplicits_object)
+    model.simplicits_scene.add_object(simplicits_object, num_qp=100)
     model.simplicits_scene.set_scene_gravity()
     scene = model.simplicits_scene
     num_pts = scene.sim_pts.shape[0]
@@ -52,7 +52,7 @@ def test_sim_z_to_full_shape(simplicits_object):
 
 def test_sim_z_dot_to_full_shape(simplicits_object):
     model = SimplicitsModel()
-    model.simplicits_scene.add_object(simplicits_object)
+    model.simplicits_scene.add_object(simplicits_object, num_qp=100)
     model.simplicits_scene.set_scene_gravity()
     scene = model.simplicits_scene
     num_pts = scene.sim_pts.shape[0]
@@ -63,7 +63,7 @@ def test_sim_z_dot_to_full_shape(simplicits_object):
 
 def test_sim_z_dot_to_full_zero_velocity(simplicits_object):
     model = SimplicitsModel()
-    model.simplicits_scene.add_object(simplicits_object)
+    model.simplicits_scene.add_object(simplicits_object, num_qp=100)
     model.simplicits_scene.set_scene_gravity()
     scene = model.simplicits_scene
     result = model.sim_z_dot_to_full(wp.zeros_like(scene.sim_z))
@@ -87,7 +87,7 @@ def test_sim_z_to_full_matches_get_object_deformed_pts(simplicits_object):
 
 def test_sim_z_dot_to_full_matches_get_object_deformed_pts(simplicits_object):
     model = SimplicitsModel()
-    model.simplicits_scene.add_object(simplicits_object)
+    model.simplicits_scene.add_object(simplicits_object, num_qp=100)
     model.simplicits_scene.set_scene_gravity()
     scene = model.simplicits_scene
     result_torch = wp.to_torch(model.sim_z_dot_to_full(scene.sim_z_dot))
