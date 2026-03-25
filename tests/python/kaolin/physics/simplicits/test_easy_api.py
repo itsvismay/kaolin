@@ -319,7 +319,7 @@ class TestEasyAPISimplicitsScene:
                          init_transform=torch.tensor([[1, 0, 0, 0],
                                                       [0, 1, 0, 10],
                                                       [0, 0, 1, 0]], device=device, dtype=dtype),
-                                                      dFdz_from_weights=True)
+                                                      )
         return scene
     
     def test_simplicits_object_create_rigid(self, example_rigid_cube):
@@ -860,10 +860,10 @@ class TestSimulatedObjectFlags:
         # set the seed for consistent cubature points
         torch.manual_seed(0)
         scene.add_object(sim_obj_qr, num_qp=128,
-                               normalize_weights_by_samples=False, dFdz_from_weights=True, apply_qr=True)
+                               normalize_weights_by_samples=False, apply_qr=True)
         torch.manual_seed(0)
         scene.add_object(sim_obj_no_qr, num_qp=128,
-                               normalize_weights_by_samples=False, dFdz_from_weights=True, apply_qr=False)
+                               normalize_weights_by_samples=False, apply_qr=False)
         scene._get_scene_ready_for_forces()
 
         for _ in range(5):
@@ -900,18 +900,20 @@ class TestSimulatedObjectFlags:
         # set the seed for consistent cubature points
         torch.manual_seed(0)
         scene.add_object(sim_obj_norm, num_qp=128,
-                               normalize_weights_by_samples=False, dFdz_from_weights=True)
+                               normalize_weights_by_samples=True)
         torch.manual_seed(0)
         scene.add_object(sim_obj_no_norm, num_qp=128,
-                               normalize_weights_by_samples=False, dFdz_from_weights=True)
+                               normalize_weights_by_samples=False)
         scene._get_scene_ready_for_forces()
 
         for _ in range(5):
-            # scale transform by weight norm is equivalent to normalize weights
+            # Normalized weights * z_norm = raw weights * z_raw when z_raw = z_norm / norms
+            # But standard_lbs uses the stored weights, so we need to map z between spaces
             z_norm_th = torch.randn(sim_obj_norm.num_handles, 12, device=device)
+            handle_norms = scene.get_object(0).handle_norms
+            # For object 1 (unnormalized): z_raw = z_norm / norms
             z_no_norm_th = z_norm_th.clone()
-            z_no_norm_th[:-1, :] /= scene.get_object(0).skinning_weight_function.w_norm.view(-1, 1)
-            z_no_norm_th[-1, :] /= scene.get_object(0).skinning_weight_function.one_norm
+            z_no_norm_th /= handle_norms.view(-1, 1)
             z = wp.from_torch(torch.cat([z_norm_th.flatten(), z_no_norm_th.flatten()], dim=0), dtype=wp.float32)
             scene.sim_z.assign(z)
 

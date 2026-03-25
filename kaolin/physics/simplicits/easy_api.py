@@ -76,40 +76,28 @@ class NormalizedSkinningWeightsFcn(torch.nn.Module):
 
 
 class NormalizedSkinningWeightsFcnWithConstant:
-    r"""Wraps any callable skinning weight model: normalizes input pts to [0,1],
-    calls model, divides by w_norm, and appends constant handle column.
+    r"""Wraps any callable skinning weight model: calls model and appends constant handle column.
 
     Unlike NormalizedSkinningWeightsFcn (nn.Module), this class works with any callable
     (lambdas, plain functions, nn.Modules) and is not itself an nn.Module.
+    Weight normalization (w_norm) is handled by SimulatedObject, not here.
     """
     def __init__(self, model, bb_min, bb_max):
         self.model = model
         self.bb_min = bb_min
         self.bb_max = bb_max
-        device = bb_min.device
-        output_channel = model(torch.zeros((1, 3), device=device)).shape[1]
-        self.w_norm = torch.ones((output_channel,), device=device)
-        self.one_norm = 1.0
-
-    @torch.no_grad()
-    def set_norm(self, pts):
-        w = self.model(pts)
-        self.w_norm = torch.sqrt(torch.sum(w ** 2, dim=0))
-        ones = torch.ones((pts.shape[0], 1), device=pts.device, dtype=pts.dtype)
-        self.one_norm = torch.sqrt(ones.T @ ones).mean().item()
 
     def __call__(self, pts):
         return torch.cat([
-            self.model(pts) / self.w_norm.unsqueeze(0),
-            torch.ones((pts.shape[0], 1), device=pts.device) / self.one_norm,
+            self.model(pts),
+            torch.ones((pts.shape[0], 1), device=pts.device),
         ], dim=1)
 
     def grad(self, pts):
         if hasattr(self.model, 'grad'):
             model_grad = self.model.grad(pts)
-            # Chain rule: dw/dx = dw/dx_norm / (bb_max - bb_min)
             return torch.cat([
-                model_grad  / self.w_norm[None, :, None],
+                model_grad,
                 torch.zeros((model_grad.shape[0], 1, model_grad.shape[2]), device=pts.device)
             ], dim=1)
         else:
@@ -118,43 +106,28 @@ class NormalizedSkinningWeightsFcnWithConstant:
             return jac_weight_fcn(pts)
 
 class SkinningWeightsFcn(torch.nn.Module):
-    r"""
-    A skinning weight function that applies the model to the points directly and appends a constant weight of 1.
+    r"""Applies the model to raw points directly and appends a constant weight of 1.
+    Used for RKPM which works in original coordinate space (not [0,1] normalized).
+    Weight normalization (w_norm) is handled by SimulatedObject, not here.
     """
     def __init__(self, model):
         super().__init__()
         self.model = model
-        layer = next(model.parameters())
-        device = layer.device
-        output_channel = model(torch.zeros((1, 3), device=device)).shape[1]
-        self.w_norm = torch.nn.Parameter(torch.ones((output_channel,), device=device))
-        self.one_norm = 1.0
-
-    @torch.no_grad
-    def set_norm(self, pts):
-        w = self.model(pts)
-        w_norm = torch.sqrt(torch.sum(w ** 2, dim=0))
-        ones = torch.ones((pts.shape[0], 1), device=pts.device, dtype=pts.dtype)
-        one_norm = torch.sqrt(ones.T @ ones).mean().item()
-        self.w_norm.copy_(w_norm)
-        self.one_norm = one_norm
 
     def forward(self, pts):
         return torch.cat([
-            self.model(pts) / self.w_norm.unsqueeze(0),
-            torch.ones((pts.shape[0], 1), device=pts.device) / self.one_norm,
+            self.model(pts),
+            torch.ones((pts.shape[0], 1), device=pts.device),
         ], dim=1)
-    
+
     def grad(self, pts):
-        # compute the gradient of the skinning weights with respect to the points locations
         if hasattr(self.model, 'grad'):
             model_grad = self.model.grad(pts)
             return torch.cat([
-                model_grad / self.w_norm[None, :, None],
+                model_grad,
                 torch.zeros((model_grad.shape[0], 1, model_grad.shape[2]), device=pts.device)
             ], dim=1)
         else:
-            # use jacrev autodiff and vmap to compute in batch
             jac_single_weight_fcn = torch.func.jacrev(lambda x: self.forward(x[None])[0])
             jac_weight_fcn = torch.vmap(jac_single_weight_fcn)
             return jac_weight_fcn(pts)
@@ -286,9 +259,7 @@ class SkinnedPhysicsPointsProtocol(SkinnedPointsProtocol, PhysicsPointsProtocol,
     This information is sufficient for the Simplicits-based simulator to simulate the object
     and optimize the reduced-order transforms according to the energies in the system.
     """
-    # Per-sampled primitive sparse matrices
-    B: Any  # TODO: fix type
-    dFdz: Any  # TODO: fix type
+    skinning_weights_jac: Any  # (N, H, 3) spatial gradient of skinning weights
 
 
 class SkinnedPoints(SkinnedPointsProtocol):
@@ -306,119 +277,52 @@ class SkinnedPoints(SkinnedPointsProtocol):
 
 
 class SkinnedPhysicsPoints(PhysicsPoints, SkinnedPhysicsPointsProtocol):
+    """Lightweight data class: point-sampled object with skinning weights and their spatial gradients.
+    B and dFdz matrices are computed by SimulatedObject, not stored here.
     """
-    Class containing minimal information for a simulatable simplicits object.
-    """
-    def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weights, dFdz):
-        """
-        Constructor for making minimal simulatable data object from USD file.
-        # TODO(Clement): note
-
-        Args:
-            pts:
-            yms:
-            prs:
-            rhos:
-            appx_vol:
-            skinning_weights:
-            dFdz:
-        """
+    def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weights, skinning_weights_jac=None):
         super().__init__(pts=pts, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol)
         self.skinning_weights = skinning_weights
-        self.dFdz = dFdz
-        self._B = None
-        self._dFdz_dense = None  # computed on demand
-        self._B_dense = None  # computed on demand
+        self.skinning_weights_jac = skinning_weights_jac
 
     def subsample(self, num_pts=None, sample_indices=None):
         indices = self._get_subsample_indices(num_pts, sample_indices)
-
-        # Subsample physics attributes using parent logic
         sampled_points = super().subsample(sample_indices=indices)
-
-        # Subsample skinning-specific attributes
         skinning_weights = self.skinning_weights[indices, :]
-
-        # TODO: dFdz is a sparse matrix; proper subsampling would require
-        # recomputing from the skinning_weight_function (not stored here).
-        # For now, set to None - caller should recompute if needed.
-        raise NotImplementedError('TODO: properly subsample dFdz')
-        dFdz = None
-
+        skinning_weights_jac = self.skinning_weights_jac[indices, :, :] if self.skinning_weights_jac is not None else None
         return SkinnedPhysicsPoints(
-            pts=sampled_points.pts,
-            yms=sampled_points.yms,
-            prs=sampled_points.prs,
-            rhos=sampled_points.rhos,
-            appx_vol=sampled_points.appx_vol,
-            skinning_weights=skinning_weights,
-            dFdz=dFdz
+            pts=sampled_points.pts, yms=sampled_points.yms, prs=sampled_points.prs,
+            rhos=sampled_points.rhos, appx_vol=sampled_points.appx_vol,
+            skinning_weights=skinning_weights, skinning_weights_jac=skinning_weights_jac
         ), indices
-
-    @classmethod
-    def from_skinning_weights_function(cls, pts, yms, prs, rhos, appx_vol, skinning_weight_function, dFdz_from_weights=False):
-        skinning_weights = skinning_weight_function(pts)
-
-        # TODO: decide where to skip this step for kinematic objects; likely in SimulatableObject
-        if dFdz_from_weights:
-            with torch.no_grad():
-                sim_weights = skinning_weight_function(pts)
-                sim_weights_jac = skinning_weight_function.grad(pts)
-            dFdz = sparse_dFdz_matrix(sim_weights, sim_weights_jac, pts)
-        else:
-            dFdz = sparse_dFdz_matrix_from_dense(skinning_weight_function, pts)
-        return cls(pts=pts, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol,
-                   skinning_weights=skinning_weights, dFdz=dFdz)
 
     @property
     def num_handles(self):
         return self.skinning_weights.shape[1]
 
-    @property
-    def B(self):
-        if self._B is None:
-            self._B = sparse_lbs_matrix(
-                wp.from_torch(self.skinning_weights),
-                wp.from_torch(self.pts, dtype=wp.vec3))
-            self._B.nnz_sync()
-        return self._B
-
-    @property
-    def B_dense(self):
-        if self._B_dense is None:
-            self._B_dense = warp_utilities._bsr_to_torch(self.B).to_dense()
-        return self._B_dense
-
-    @property
-    def dFdz_dense(self):
-        if self._dFdz_dense is None:
-            # TODO: decide where to skip this step for kinematic objects; likely in SimulatableObject
-            self._dFdz_dense = warp_utilities._bsr_to_torch(self.dFdz).to_dense()
-        return self._dFdz_dense
-
 
 
 class SimplicitsObject(PhysicsPoints):
-    def bake_for_simulation(self, qp_idx=None, num_qp=None, normalize_weights_by_samples=False, dFdz_from_weights=False) -> SkinnedPhysicsPointsProtocol:
-        """
-        Bakes the skinning weights field for a subset of points and variables needed for simulation.
-        """
-        # TODO: need guidance on collision point samples; which variables are needed for these? How will the scene treat these if separate?
+    def bake_for_simulation(self, qp_idx=None, num_qp=None) -> SkinnedPhysicsPointsProtocol:
+        """Bakes skinning weights and their spatial gradients for simulation.
 
-        # First we sample (if num_qp and qp_idx are both None, use all points)
+        Evaluates the skinning weight function and its gradient at the (subsampled) points.
+        Returns a lightweight SkinnedPhysicsPoints; B/dFdz matrices and normalization
+        are computed later by SimulatedObject.
+        """
         if num_qp is None and qp_idx is None:
             sampled = self
         else:
             sampled = self.subsample(num_pts=num_qp, sample_indices=qp_idx)
 
-        if normalize_weights_by_samples:
-            self.skinning_weight_function.set_norm(sampled.pts)
+        with torch.no_grad():
+            weights = self.skinning_weight_function(sampled.pts)
+            weights_jac = self.skinning_weight_function.grad(sampled.pts)
 
-        # Then we get all needed physics information
-        return SkinnedPhysicsPoints.from_skinning_weights_function(
-            pts=sampled.pts, yms=sampled.yms, prs=sampled.prs, rhos=sampled.rhos, appx_vol=self.appx_vol,
-            skinning_weight_function=self.skinning_weight_function,
-            dFdz_from_weights=dFdz_from_weights)
+        return SkinnedPhysicsPoints(
+            pts=sampled.pts, yms=sampled.yms, prs=sampled.prs,
+            rhos=sampled.rhos, appx_vol=self.appx_vol,
+            skinning_weights=weights, skinning_weights_jac=weights_jac)
 
     def bake_for_rendering(self, points=None) -> SkinnedPointsProtocol:
         """
@@ -776,79 +680,109 @@ class SimulatedObject(SkinnedPhysicsPoints):
     """
 
     @classmethod
-    def from_skinned_physics_points(cls, phys_pts: SkinnedPhysicsPointsProtocol, init_transform, is_kinematic=False, apply_qr=False):
-        """
-        Creates simulation object given skinned physics points, minimal data needed for Simplicits simulation
-        (e.g. this data can be read from disk).
-        """
+    def from_skinned_physics_points(cls, phys_pts: SkinnedPhysicsPointsProtocol, init_transform,
+                                     is_kinematic=False, normalize_weights_by_samples=False, apply_qr=False):
+        """Creates simulation object from skinned physics points (e.g. from bake_for_simulation or disk)."""
         return cls(pts=phys_pts.pts, yms=phys_pts.yms, prs=phys_pts.prs, rhos=phys_pts.rhos, appx_vol=phys_pts.appx_vol,
-                   skinning_weights=phys_pts.skinning_weights, dFdz=phys_pts.dFdz,
-                   init_transform=init_transform, is_kinematic=is_kinematic, apply_qr=apply_qr)
+                   skinning_weights=phys_pts.skinning_weights, skinning_weights_jac=phys_pts.skinning_weights_jac,
+                   init_transform=init_transform, is_kinematic=is_kinematic,
+                   normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr)
 
-    @classmethod
-    def from_simplicits_object(cls, obj: SimplicitsObject, init_transform, is_kinematic=False):
-        """
-        Creates simulation object given a trained or otherwise instantiated SimplicitsObject.
-
-        # TODO(Clement): note
-        # TODO(Vismay): note! Sampling can be called on the input object first. SimulatedObject should not do sampling.
-
-        Args:
-            obj:
-            init_transform:
-            is_kinematic:
-
-        Returns:
-
-        """
-        if not is_kinematic:
-            return cls.from_skinned_physics_points(
-                obj.bake_for_simulation(), init_transform=init_transform, is_kinematic=is_kinematic)
-        else:
-            # Here we bypass automatic dFdz computation in SkinnedPhysicsPoints
-            skinning_weights = obj.skinning_weight_function(obj.pts)
-
-            num_rows = 9 * obj.pts.shape[0]
-            num_cols = 12 * skinning_weights.shape[1]
-            dFdz = wps.bsr_zeros(num_rows, num_cols, wp.float32)
-            return cls(pts=obj.pts, yms=obj.yms, prs=obj.prs, rhos=obj.rhos, appx_vol=obj.appx_vol,
-                       skinning_weights=skinning_weights, dFdz=dFdz,
-                       init_transform=init_transform, is_kinematic=is_kinematic)
-
-    def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weights, dFdz, init_transform=None, is_kinematic=False, apply_qr=False):
-        super().__init__(pts=pts, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol, skinning_weights=skinning_weights, dFdz=dFdz)
+    def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weights, skinning_weights_jac=None,
+                 init_transform=None, is_kinematic=False, normalize_weights_by_samples=False, apply_qr=False):
+        super().__init__(pts=pts, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol,
+                         skinning_weights=skinning_weights, skinning_weights_jac=skinning_weights_jac)
         self.init_transform = init_transform
         self.is_kinematic = is_kinematic
+        self.normalize_weights_by_samples = normalize_weights_by_samples
+        self.apply_qr = apply_qr
 
         self.num_qp = self.pts.shape[0]
         self.num_cp = self.pts.shape[0]
-
         self.sample_vols = torch.full(
             (self.num_qp,), float(self.appx_vol / self.num_qp),
             device=self.device, dtype=self.dtype)
-
         self.sample_masses = (self.appx_vol / self.num_qp) * self.rhos
 
-        if self.is_kinematic:
+        # 1. Optionally normalize weights for better conditioning
+        self.handle_norms = None
+        if normalize_weights_by_samples:
+            self._apply_weight_normalization()
+
+        # 2. Compute sparse B matrix
+        self.B = sparse_lbs_matrix(
+            wp.from_torch(self.skinning_weights),
+            wp.from_torch(self.pts, dtype=wp.vec3))
+        self.B.nnz_sync()
+
+        # 3. Compute sparse dFdz matrix
+        if is_kinematic:
+            num_rows = 9 * self.pts.shape[0]
+            num_cols = 12 * self.skinning_weights.shape[1]
+            self.dFdz = wps.bsr_zeros(num_rows, num_cols, wp.float32)
+        else:
+            self.dFdz = sparse_dFdz_matrix(
+                self.skinning_weights.detach().cpu().numpy(),
+                self.skinning_weights_jac.detach().cpu().numpy(),
+                self.pts.detach().cpu().numpy())
+        self.dFdz.nnz_sync()
+
+        # Dense versions (computed on demand)
+        self._B_dense = None
+        self._dFdz_dense = None
+        if is_kinematic:
             self._dFdz_dense = torch.zeros(self.dFdz.shape, device=self.device, dtype=self.dtype)
 
-        self.z = None
-        self.z_prev = None
-        self.z_dot = None
-        self.normalize_weights_by_samples = False
-        self.dFdz_from_weights = False
-
-        self.apply_qr = apply_qr
+        # 4. Optionally apply QR
         if apply_qr:
             self._apply_qr_decomposition()
 
+        # 5. DOF state
+        self.z = None
+        self.z_prev = None
+        self.z_dot = None
         self.reset_sim_state()
+
+    @property
+    def B_dense(self):
+        if self._B_dense is None:
+            self._B_dense = warp_utilities._bsr_to_torch(self.B).to_dense()
+        return self._B_dense
+
+    @property
+    def dFdz_dense(self):
+        if self._dFdz_dense is None:
+            self._dFdz_dense = warp_utilities._bsr_to_torch(self.dFdz).to_dense()
+        return self._dFdz_dense
+
+    def _apply_weight_normalization(self):
+        """Normalize skinning weights and jacobians for better conditioning of the Newton system.
+        Stores B_raw (from unnormalized weights) for correct mass matrix computation.
+        """
+        import math
+        w = self.skinning_weights[:, :-1]
+        w_norm = torch.sqrt(torch.sum(w ** 2, dim=0))
+        one_norm = math.sqrt(self.pts.shape[0])
+        self.handle_norms = torch.cat([w_norm, torch.tensor([one_norm], device=w_norm.device)])
+
+        # Normalize all handles including constant
+        self.skinning_weights = torch.cat([
+            w / w_norm.unsqueeze(0),
+            self.skinning_weights[:, -1:] / one_norm
+        ], dim=1)
+
+        if self.skinning_weights_jac is not None:
+            jac = self.skinning_weights_jac[:, :-1, :]
+            self.skinning_weights_jac = torch.cat([
+                jac / w_norm[None, :, None],
+                self.skinning_weights_jac[:, -1:, :] / one_norm
+            ], dim=1)
 
     def _apply_qr_decomposition(self):
         """QR: orthogonalize B to reduce condition number of Newton system."""
         B_dense = self.B_dense
         B_np = B_dense.detach().cpu().numpy()
-        Q, R, P = qr(B_np, mode='economic', pivoting=True)
+        _, R, P = qr(B_np, mode='economic', pivoting=True)
         Pmat = np.eye(B_np.shape[1])[:, P]
         self.th_Pmat = torch.tensor(Pmat, dtype=self.dtype, device=self.device)
         th_R = torch.tensor(R, dtype=self.dtype, device=self.device)
@@ -856,31 +790,28 @@ class SimulatedObject(SkinnedPhysicsPoints):
             th_R, torch.eye(th_R.shape[0], device=th_R.device), upper=True)
 
         Q_dense = B_dense @ self.PmatRinv
-        self._B = wps.bsr_copy(warp_utilities._warp_csr_from_torch_dense(Q_dense), block_shape=(1, 4))
-        self._B.nnz_sync()
+        self.B = wps.bsr_copy(warp_utilities._warp_csr_from_torch_dense(Q_dense), block_shape=(1, 4))
+        self.B.nnz_sync()
         self._B_dense = Q_dense
 
-        dFdz_dense = warp_utilities._bsr_to_torch(self.dFdz).to_dense()
+        dFdz_dense = self.dFdz_dense
         self._dFdz_dense = dFdz_dense @ self.PmatRinv
         self.dFdz = warp_utilities._warp_csr_from_torch_dense(self._dFdz_dense)
         self.dFdz.nnz_sync()
 
     def reset_sim_state(self):
-        r"""Reset the simulation state. Object's handle transforms are set back to initial deformations.
-        This does not reset any material parameters or simplicits object parameters.
-        """
-
+        r"""Reset the simulation state. Object's handle transforms are set back to initial deformations."""
         self.z = torch.zeros(self.num_handles * 12, dtype=self.dtype, device=self.device)
 
-        # Sets the final (constant) handle
         if self.init_transform is not None:
             if self.apply_qr:
-                # QR: solve for z that produces the initial transform in the orthogonalized basis
                 dx = self.pts @ self.init_transform[:3, :3].T + self.init_transform[:3, 3:].T
                 self.z[:] = torch.linalg.lstsq(self.B_dense, dx.view(-1, 1)).solution.squeeze(1)
+            elif self.normalize_weights_by_samples:
+                # z_norm = z_raw * norm; constant handle norm = one_norm
+                self.z[-12:] = self.init_transform.flatten() * self.handle_norms[-1]
             else:
-                # the constant handle weight may have been scaled by normalization
-                self.z[-12:] = self.init_transform.flatten() / self.skinning_weights[0, -1].detach().item()
+                self.z[-12:] = self.init_transform.flatten()
 
         self.z_prev = self.z.clone().detach()
         self.z_dot = torch.zeros_like(self.z, device=self.device)
@@ -1151,10 +1082,9 @@ class SimplicitsScene:
         # [3 * scene_pts, 3 * scene_pts] sparse diagonal matrix
         self.sim_M = wps.bsr_diag(wp.array(np_sim_masses, dtype=wp.float32))
 
-        # LBS matrix and Simplicits mass matrix
+        # LBS matrix and mass matrix
         temp_B = warp_utilities._block_diagonalize(_stacked_sparse_B)
         self.sim_B = wps.bsr_copy(temp_B, block_shape=(1, self._dof_bs))
-
         self.sim_BMB = wps.bsr_transposed(self.sim_B)@self.sim_M@self.sim_B
 
         # Scene dFdz Matrix
@@ -1219,39 +1149,40 @@ class SimplicitsScene:
         obj.init_transform = relative_transform
         self.reset_scene() # quick way to update the scene's dofs
 
+    def _get_object_transforms_internal(self, object_id):
+        """Returns transforms in internal (normalized/QR'd) space. For simulation use only."""
+        tfms = None
+        if self.sim_z is not None:
+            wp_tfms = wp.clone(self.sim_z[self.object_to_z_map[object_id]])
+            tfms = wp.to_torch(wp_tfms, requires_grad=False).reshape((-1, 3, 4))
+            if self.sim_obj_dict[object_id].apply_qr:
+                tfms = (self.sim_obj_dict[object_id].PmatRinv @ tfms.flatten()).view(-1, 3, 4)
+        else:
+            tfms = torch.zeros(self.sim_obj_dict[object_id].num_handles, 3, 4, device=self.device, dtype=self.dtype)
+            tfms[-1] = self.sim_obj_dict[object_id].init_transform.reshape(-1, 3, 4)
+
+        padding = torch.zeros(tfms.shape[0], 1, 4, device=self.device, dtype=self.dtype)
+        padding[:, 0, 3] = 1.0
+        return torch.cat([tfms, padding], dim=1)
+
     def get_object_transforms(self, object_id):
-        """
-        Returns the current 4x4 padded *relative* transforms of the object's handles. Add identity to the result get standard transform.
-        
+        """Returns the current 4x4 padded *relative* transforms in raw (physical) space.
+
+        Undoes any internal normalization (weight norms, QR) so the transforms
+        can be used with unnormalized skinning weights (e.g. rendered points).
+
         Args:
             object_id (int): Id of the object to get the transforms of
 
         Returns:
-            torch.tensor: Torch tensor of size :math:`(\text{num_handles}, 4, 4)` for relative transforms.
+            torch.tensor: Torch tensor of size :math:`(\\text{num_handles}, 4, 4)` for relative transforms.
         """
-        tfms = None
-        
-        # Sets tfms to the current objects transforms if sim_z is set, 
-        # otherwise sets it to the initial transforms (both are 3x4 tensors)
-        if self.sim_z is not None:
-            wp_tfms = wp.clone(self.sim_z[self.object_to_z_map[object_id]])
-            tfms = wp.to_torch(wp_tfms, requires_grad=False).reshape(
-                (-1, 3, 4))
-            # QR: transform z back from QR to standard basis for output
-            if self.sim_obj_dict[object_id].apply_qr:
-                tfms = (self.sim_obj_dict[object_id].PmatRinv @ tfms.flatten()).view(-1, 3, 4)
-        else:
-            # Sets to the initial transforms
-            tfms = torch.zeros(self.sim_obj_dict[object_id].num_handles, 3, 4, device=self.device, dtype=self.dtype)
-            tfms[-1] = self.sim_obj_dict[object_id].init_transform.reshape(-1, 3, 4)
-
-        # Pad with 0,0,0,1 rows to make each transform 4x4
-        padding = torch.zeros(tfms.shape[0], 1, 4, device=self.device, dtype=self.dtype)
-        padding[:, 0, 3] = 1.0
-        
-        # Concatenate the padding to the bottom of each transform
-        padded_tfms = torch.cat([tfms, padding], dim=1)
-        return padded_tfms
+        tfms = self._get_object_transforms_internal(object_id)
+        # Un-normalize: z_raw = z_norm / norms
+        if self.sim_obj_dict[object_id].normalize_weights_by_samples:
+            norms = self.sim_obj_dict[object_id].handle_norms
+            tfms[:, :3, :] = tfms[:, :3, :] / norms.view(-1, 1, 1)
+        return tfms
 
     def _add_object(self, simulated_object: SimulatedObject, rendered_points: SkinnedPoints = None):
         if self._ready_for_forces:
@@ -1264,56 +1195,37 @@ class SimplicitsScene:
         self.current_id += 1
         return self.current_id - 1
 
-    def add_object(self, sim_object: SimplicitsObject | SkinnedPhysicsPointsProtocol, num_qp=None, init_transform = None, is_kinematic=False, rendered_points: SkinnedPointsProtocol = None, normalize_weights_by_samples=False, dFdz_from_weights=False, apply_qr=False):
-        r"""Adds a simplicits object to the scene as a SimulatedObject. Can add a just trained SimplicitsObject which
-        contains a skinning weight field, or can also accept a baked version, sufficient for simulation.
-
-        Optionally allows the scene to keep track of a rendered entity, such as all the Gaussian points.
+    def add_object(self, sim_object: SimplicitsObject | SkinnedPhysicsPointsProtocol, num_qp=None, init_transform=None, is_kinematic=False, rendered_points: SkinnedPointsProtocol = None, normalize_weights_by_samples=False, apply_qr=False):
+        r"""Adds a simplicits object to the scene as a SimulatedObject.
 
         Args:
-            sim_object (SimplicitsObject | SkinnedPhysicsPoints): trained simplicits object or already sampled skinned points, e.g. from USD file
-            num_qp (int, optional): Number of quadrature points (sample points to integrate over). If not provided, the object will not be subsampled.
-            init_transform (torch.Tensor): 3x4 or 4x4 torch tensor specifying object's initial skinning transform. 
-                                            This argument takes a standard transformation, not a delta. 
-                                            Subsequently, the Identity matrix is subtracted from it and the delta transform is saved.
-            is_kinematic (bool): Object is kinematic if it is not solved for during dynamics simulation.
-            rendered_points: optional full sampling of rendered points
-            normalize_weights_by_samples (bool, optional): Whether to normalize skinning weights by
-                norm computed over the sampled quadrature points. Defaults to False.
-            dFdz_from_weights (bool, optional): If True, computes the dFdz matrix analytically
-                from the skinning weight function and its Jacobian. If False, uses the old way.
-                Defaults to False.
-            apply_qr (bool, optional): If True, applies QR decomposition to the LBS matrix to
-                orthogonalize the basis, reducing the condition number of the system matrix. Defaults to False.
+            sim_object (SimplicitsObject | SkinnedPhysicsPoints): trained simplicits object or already sampled skinned points
+            num_qp (int, optional): Number of quadrature points. If not provided, uses all points.
+            init_transform (torch.Tensor): 3x4 or 4x4 initial skinning transform (standard, not delta).
+            is_kinematic (bool): If True, object is not solved during dynamics.
+            rendered_points: optional pre-baked rendered points for visualization.
+            normalize_weights_by_samples (bool): Normalize weights by L2 norm for better conditioning.
+            apply_qr (bool): Apply QR decomposition to orthogonalize the LBS basis.
 
         Returns:
             int: The id assigned to the newly added object.
         """
-        num_cp = num_qp # TODO: Make this a separate parameter
-
-        # Check if init transform is a 3x4 or 4x4 tensor, convert to 3x4 if necessary
-        # Subtract identity transform from init transform to get relative transform
         if torch.is_tensor(init_transform):
             relative_transform = torch_utilities.standard_transform_to_relative(init_transform)
         else:
             relative_transform = torch.zeros(3, 4, device=self.device, dtype=self.dtype)
 
         if isinstance(sim_object, SimplicitsObject):
-            # For SimplicitsObject, bake directly with num_qp to avoid double subsampling
-            baked = sim_object.bake_for_simulation(num_qp=num_qp,
-                normalize_weights_by_samples=normalize_weights_by_samples,
-                dFdz_from_weights=dFdz_from_weights)
+            baked = sim_object.bake_for_simulation(num_qp=num_qp)
             simulated_object = SimulatedObject.from_skinned_physics_points(
-                baked, init_transform=relative_transform, is_kinematic=is_kinematic, apply_qr=apply_qr)
+                baked, init_transform=relative_transform, is_kinematic=is_kinematic,
+                normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr)
             simulated_object.skinning_weight_function = sim_object.skinning_weight_function
         else:
-            # For already baked SkinnedPhysicsPointsProtocol, subsample if needed
             sampled = sim_object.subsample(num_qp) if num_qp is not None else sim_object
             simulated_object = SimulatedObject.from_skinned_physics_points(
-                sampled, init_transform=relative_transform, is_kinematic=is_kinematic, apply_qr=apply_qr)
-
-        simulated_object.normalize_weights_by_samples = normalize_weights_by_samples
-        simulated_object.dFdz_from_weights = dFdz_from_weights
+                sampled, init_transform=relative_transform, is_kinematic=is_kinematic,
+                normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr)
 
         return self._add_object(simulated_object, rendered_points)
     
@@ -1902,7 +1814,13 @@ class SimplicitsScene:
         else:
             raise ValueError(f'Only supports "rendered" or "simulated" points')
 
-        tfms = self.get_object_transforms(obj_idx)[:, :3, :]
+        if points == 'simulated':
+            # Simulated points use normalized weights — use internal transforms
+            tfms = self._get_object_transforms_internal(obj_idx)[:, :3, :]
+        else:
+            # Rendered points use raw weights — use public (un-normalized) transforms
+            tfms = self.get_object_transforms(obj_idx)[:, :3, :]
+
         return standard_lbs(obj.pts, tfms.unsqueeze(0), obj.skinning_weights).squeeze()
 
     def get_object_point_transforms(self, obj_idx,

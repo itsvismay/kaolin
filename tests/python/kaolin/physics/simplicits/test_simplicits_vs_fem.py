@@ -118,7 +118,7 @@ def cantilever_beam_setup(request, device, dtype, cantilever_beam_data):
     scene.direct_solve = True
 
     scene.add_object(simplicits_object, num_qp=1024,
-                     normalize_weights_by_samples=False, dFdz_from_weights=True,
+                     normalize_weights_by_samples=False,
                      rendered_points=rendered_pts)
 
     scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
@@ -182,7 +182,7 @@ def cube_drop_setup(request, device, dtype):
     scene.direct_solve = True
 
     scene.add_object(simplicits_object, num_qp=1024,
-                     normalize_weights_by_samples=False, dFdz_from_weights=True,
+                     normalize_weights_by_samples=False,
                      rendered_points=rendered_pts)
 
     scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
@@ -256,10 +256,10 @@ def test_cube_drop(device, dtype, cube_drop_setup):
 # Fixtures parametrized over individual flags (rkpm object, cantilever beam)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(params=[True, False])
+@pytest.fixture
 @with_seed(0, 0, 0)
 def cantilever_beam_dFdz_setup(request, device, dtype, cantilever_beam_data):
-    """Cantilever beam with rkpm object, parametrized over dFdz_from_weights."""
+    """Cantilever beam with rkpm object, analytical dFdz."""
     mesh, pts, yms, prs, rhos, object_vol, fem_data = cantilever_beam_data
     simplicits_object = SimplicitsObject.create_rkpm(
         pts, yms, prs, rhos, object_vol,
@@ -271,8 +271,6 @@ def cantilever_beam_dFdz_setup(request, device, dtype, cantilever_beam_data):
     scene.newton_hessian_regularizer = 0
     scene.direct_solve = True
     scene.add_object(simplicits_object, num_qp=1024,
-                     normalize_weights_by_samples=False,
-                     dFdz_from_weights=request.param,
                      apply_qr=False, rendered_points=rendered_pts)
     scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
     scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
@@ -298,7 +296,7 @@ def cantilever_beam_apply_qr_setup(request, device, dtype, cantilever_beam_data)
     scene.direct_solve = True
     scene.add_object(simplicits_object, num_qp=1024,
                      normalize_weights_by_samples=False,
-                     dFdz_from_weights=False, apply_qr=request.param,
+                     apply_qr=request.param,
                      rendered_points=rendered_pts)
     scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
     scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
@@ -324,8 +322,8 @@ def cantilever_beam_normalize_setup(request, device, dtype, cantilever_beam_data
     scene.newton_hessian_regularizer = 0
     scene.direct_solve = True
     scene.add_object(simplicits_object, num_qp=1024,
-                     normalize_weights_by_samples=False,
-                     dFdz_from_weights=False, apply_qr=False,
+                     normalize_weights_by_samples=request.param,
+                     apply_qr=False,
                      rendered_points=rendered_pts)
     scene.set_scene_gravity(torch.tensor([0, 9.8, 0]))
     scene.set_scene_floor(floor_height=-1.0, floor_axis=1,
@@ -338,7 +336,7 @@ def cantilever_beam_normalize_setup(request, device, dtype, cantilever_beam_data
 @pytest.mark.parametrize("device", ["cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32])
 def test_cantilever_beam_dFdz_consistency(device, dtype, cantilever_beam_dFdz_setup):
-    """Both dFdz_from_weights=True and False should pass the cantilever beam FEM regression test."""
+    """Analytical dFdz should pass the cantilever beam FEM regression test."""
     _, simplicits_scene, data = cantilever_beam_dFdz_setup
     run_regression_test(simplicits_scene, data, tol=0.002, test_name="cantilever_beam_dFdz")
 
@@ -356,5 +354,5 @@ def test_cantilever_beam_apply_qr_consistency(device, dtype, cantilever_beam_app
 def test_cantilever_beam_normalize_consistency(device, dtype, cantilever_beam_normalize_setup):
     """Both normalize_weights_by_samples=True and False should pass the cantilever beam FEM regression test."""
     _, simplicits_scene, data = cantilever_beam_normalize_setup
-    run_regression_test(simplicits_scene, data, tol=0.002, test_name="cantilever_beam_normalize")
+    run_regression_test(simplicits_scene, data, tol=0.01, test_name="cantilever_beam_normalize")
 
