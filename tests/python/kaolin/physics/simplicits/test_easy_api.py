@@ -235,7 +235,7 @@ class TestEasyAPISimplicitsObjectTraining:
         # Set pts, appx_vol, yms, prs, rhos to normalized values
         training_pts = normalized_pts
 
-        le, lo = kal.physics.simplicits.losses.compute_losses(sim_obj.skinning_weight_function.model.model,
+        le, lo = kal.physics.simplicits.losses.compute_losses(sim_obj.skinning_weight_function.model,
                                                             training_pts,
                                                             yms.unsqueeze(-1),
                                                             prs.unsqueeze(-1),

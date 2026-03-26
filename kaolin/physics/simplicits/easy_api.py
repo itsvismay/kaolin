@@ -49,88 +49,43 @@ __all__ = [
     'SimplicitsScene',
 ]
 
-class NormalizedSkinningWeightsFcn(torch.nn.Module):
-    r"""Light nn.Module wrapper: normalizes input pts to [0,1] and calls the model.
-    Kept for backward compat with .pth file serialization. No constant handle, no w_norm.
-    Use NormalizedSkinningWeightsFcnWithConstant for simulation.
-    """
-    def __init__(self, model, bb_min, bb_max):
-        super().__init__()
-        self.model = model
-        self.bb_min = bb_min
-        self.bb_max = bb_max
+class SkinningWeightsFcn:
+    r"""Universal skinning weight wrapper. Calls model and appends constant handle column.
 
-    def forward(self, pts):
-        return self.model((pts - self.bb_min) / (self.bb_max - self.bb_min))
-    
-    def grad(self, pts):
-        normalized_pts = (pts - self.bb_min) / (self.bb_max - self.bb_min)
-        scale = (self.bb_max - self.bb_min).unsqueeze(0).unsqueeze(0)
-        if hasattr(self.model, 'grad'):
-            model_grad = self.model.grad(normalized_pts)
-            return model_grad / scale
-        else:
-            jac_single = torch.func.jacrev(lambda x: self.model(x[None])[0])
-            model_grad = torch.vmap(jac_single)(normalized_pts)
-            return model_grad / scale
-
-
-class NormalizedSkinningWeightsFcnWithConstant:
-    r"""Wraps any callable skinning weight model: calls model and appends constant handle column.
-
-    Unlike NormalizedSkinningWeightsFcn (nn.Module), this class works with any callable
-    (lambdas, plain functions, nn.Modules) and is not itself an nn.Module.
+    Optionally normalizes input pts to [0,1] if bb_min/bb_max are provided.
+    Works with any callable (SimplicitsMLP, SimplicitsRKPM, lambda, etc.).
     Weight normalization (w_norm) is handled by SimulatedObject, not here.
     """
-    def __init__(self, model, bb_min, bb_max):
+    def __init__(self, model, bb_min=None, bb_max=None):
         self.model = model
         self.bb_min = bb_min
         self.bb_max = bb_max
+
+    def _normalize_pts(self, pts):
+        if self.bb_min is not None:
+            return (pts - self.bb_min) / (self.bb_max - self.bb_min)
+        return pts
 
     def __call__(self, pts):
         return torch.cat([
-            self.model(pts),
+            self.model(self._normalize_pts(pts)),
             torch.ones((pts.shape[0], 1), device=pts.device),
         ], dim=1)
 
     def grad(self, pts):
+        norm_pts = self._normalize_pts(pts)
         if hasattr(self.model, 'grad'):
-            model_grad = self.model.grad(pts)
+            model_grad = self.model.grad(norm_pts)
+            if self.bb_min is not None:
+                scale = (self.bb_max - self.bb_min).unsqueeze(0).unsqueeze(0)
+                model_grad = model_grad / scale
             return torch.cat([
                 model_grad,
                 torch.zeros((model_grad.shape[0], 1, model_grad.shape[2]), device=pts.device)
             ], dim=1)
         else:
-            jac_single_weight_fcn = torch.func.jacrev(lambda x: self.__call__(x[None])[0])
-            jac_weight_fcn = torch.vmap(jac_single_weight_fcn)
-            return jac_weight_fcn(pts)
-
-class SkinningWeightsFcn(torch.nn.Module):
-    r"""Applies the model to raw points directly and appends a constant weight of 1.
-    Used for RKPM which works in original coordinate space (not [0,1] normalized).
-    Weight normalization (w_norm) is handled by SimulatedObject, not here.
-    """
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, pts):
-        return torch.cat([
-            self.model(pts),
-            torch.ones((pts.shape[0], 1), device=pts.device),
-        ], dim=1)
-
-    def grad(self, pts):
-        if hasattr(self.model, 'grad'):
-            model_grad = self.model.grad(pts)
-            return torch.cat([
-                model_grad,
-                torch.zeros((model_grad.shape[0], 1, model_grad.shape[2]), device=pts.device)
-            ], dim=1)
-        else:
-            jac_single_weight_fcn = torch.func.jacrev(lambda x: self.forward(x[None])[0])
-            jac_weight_fcn = torch.vmap(jac_single_weight_fcn)
-            return jac_weight_fcn(pts)
+            jac_single = torch.func.jacrev(lambda x: self.__call__(x[None])[0])
+            return torch.vmap(jac_single)(pts)
 
 
 @runtime_checkable
@@ -476,8 +431,7 @@ class SimplicitsObject(PhysicsPoints):
         model.eval()
         ######### End of training #########
 
-        normalized_model = NormalizedSkinningWeightsFcn(model, bb_min, bb_max)
-        skinning_weight_function = NormalizedSkinningWeightsFcnWithConstant(normalized_model, bb_min, bb_max)
+        skinning_weight_function = SkinningWeightsFcn(model, bb_min, bb_max)
 
         return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function)
 
@@ -601,20 +555,16 @@ class SimplicitsObject(PhysicsPoints):
             appx_vol (Union[torch.Tensor, float]): Approximate volume. Can be either:
                 - A tensor of shape (1,)
                 - A float value
-            fcn (callable): Function that takes [0,1]-normalized points and returns skinning weights matrix.
-                If fcn is already a NormalizedSkinningWeightsFcnWithConstant, it is used as-is.
+            fcn (callable): Function that takes points and returns skinning weights matrix.
+                If fcn is already a SkinningWeightsFcn, it is used as-is.
 
         Returns:
             SimplicitsObject: A SimplicitsObject with the provided skinning weight function
         """
-        if isinstance(fcn, NormalizedSkinningWeightsFcnWithConstant):
+        if isinstance(fcn, SkinningWeightsFcn):
             skinning_weight_function = fcn
         else:
-            if not torch.is_tensor(pts):
-                raise ValueError("pts must be a torch.Tensor")
-            bb_min = pts.min(dim=0).values
-            bb_max = pts.max(dim=0).values
-            skinning_weight_function = NormalizedSkinningWeightsFcnWithConstant(fcn, bb_min, bb_max)
+            skinning_weight_function = SkinningWeightsFcn(fcn)
         return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function=skinning_weight_function)
 
     def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weight_function=None):

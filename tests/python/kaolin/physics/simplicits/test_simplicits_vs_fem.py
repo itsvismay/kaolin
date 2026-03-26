@@ -19,7 +19,7 @@ import warp as wp
 import kaolin
 import numpy as np
 from typing import Any
-from kaolin.physics.simplicits.easy_api import SimplicitsScene, SimplicitsObject, NormalizedSkinningWeightsFcnWithConstant
+from kaolin.physics.simplicits.easy_api import SimplicitsScene, SimplicitsObject, SkinningWeightsFcn
 import pytest
 from kaolin.utils.testing import with_seed
 import potpourri3d as pp3d
@@ -103,9 +103,8 @@ def cantilever_beam_setup(request, device, dtype, cantilever_beam_data):
     elif request.param == "trained":
         weights_file = os.path.dirname(os.path.realpath(
             __file__)) + "/regression_test_data/beam_weights_fcn_32_handles.pth"
-        old_wrapper = torch.load(weights_file, weights_only=False)
-        # old_wrapper is a NormalizedSkinningWeightsFcn (already normalizes inputs)
-        fcn = NormalizedSkinningWeightsFcnWithConstant(old_wrapper, old_wrapper.bb_min, old_wrapper.bb_max)
+        data = torch.load(weights_file, weights_only=False)
+        fcn = SkinningWeightsFcn(data['model'], data['bb_min'], data['bb_max'])
         simplicits_object = SimplicitsObject.create_from_function(
             pts, yms, prs, rhos, object_vol, fcn)
 
@@ -167,9 +166,8 @@ def cube_drop_setup(request, device, dtype):
     elif request.param == "trained":
         weights_file = os.path.dirname(os.path.realpath(
             __file__)) + "/regression_test_data/cube_weights_fcn_32_handles.pth"
-        old_wrapper = torch.load(weights_file, weights_only=False)
-        # old_wrapper is a NormalizedSkinningWeightsFcn (already normalizes inputs)
-        fcn = NormalizedSkinningWeightsFcnWithConstant(old_wrapper, old_wrapper.bb_min, old_wrapper.bb_max)
+        data = torch.load(weights_file, weights_only=False)
+        fcn = SkinningWeightsFcn(data['model'], data['bb_min'], data['bb_max'])
         simplicits_object = SimplicitsObject.create_from_function(
             pts, yms, prs, rhos, object_vol, fcn)
 
