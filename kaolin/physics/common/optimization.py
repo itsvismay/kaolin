@@ -156,7 +156,6 @@ def newtons_method(x,
         E_curr = energy_fcn(x)  # scalar
         G_curr = gradient_fcn(x).flatten()  # vector
         H_curr = hessian_fcn(x)  # sparse matrix
-        # logger.debug(f"Step {k}: E_curr: {E_curr}")
 
         # Project out the kinematic dofs
         if P is not None:
