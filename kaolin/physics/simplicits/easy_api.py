@@ -680,8 +680,6 @@ class SimulatedObject(SkinnedPhysicsPoints):
         # Dense versions (computed on demand)
         self._B_dense = None
         self._dFdz_dense = None
-        if is_kinematic:
-            self._dFdz_dense = torch.zeros(self.dFdz.shape, device=self.device, dtype=self.dtype)
 
         # 4. Optionally apply QR
         if apply_qr:
@@ -702,7 +700,10 @@ class SimulatedObject(SkinnedPhysicsPoints):
     @property
     def dFdz_dense(self):
         if self._dFdz_dense is None:
-            self._dFdz_dense = warp_utilities._bsr_to_torch(self.dFdz).to_dense()
+            if self.is_kinematic:
+                self._dFdz_dense = torch.zeros(self.dFdz.shape, device=self.device, dtype=self.dtype)
+            else:
+                self._dFdz_dense = warp_utilities._bsr_to_torch(self.dFdz).to_dense()
         return self._dFdz_dense
 
     def _apply_weight_normalization(self):
