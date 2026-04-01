@@ -15,7 +15,7 @@
 
 import logging
 import warnings
-from typing import Protocol, runtime_checkable, Literal, Any
+from typing import Protocol, runtime_checkable, Literal, Any, Union
 
 import warp as wp
 import warp.sparse as wps
@@ -29,6 +29,7 @@ from scipy.linalg import qr
 from kaolin.physics.simplicits.losses import compute_losses
 from kaolin.physics.simplicits.network import SimplicitsMLP
 from kaolin.physics.simplicits.rkpm import SimplicitsRKPM
+from kaolin.physics.simplicits.winding_number import DiscCut, compute_winding_number
 
 import kaolin.physics.utils.warp_utilities as warp_utilities
 import kaolin.physics.utils.torch_utilities as torch_utilities
@@ -48,6 +49,98 @@ __all__ = [
     'SimulatedObject',
     'SimplicitsScene',
 ]
+
+
+class WoundRKPMSkinningWeightsFcn(torch.nn.Module):
+    r"""Cut-aware RKPM skinning weights using 4D lifted coordinates (x, y, z, H).
+
+    Points on opposite sides of the :class:`DiscCut` have H ≈ ±h_scale, giving large 4D
+    distance and near-zero kernel values across the cut.  Eigenvectors localize to one side.
+    Call :meth:`refit` (via :meth:`SimplicitsScene.set_cut_progress_rkpm`) to recompute
+    eigenvectors for a new alpha value.
+
+    Two side-specific constant handles are appended (rather than a single shared one) so that
+    each fractured piece has its own independent rigid-body DOF:
+
+    - ``pos_const = (H > 0)``: 1 on the positive side of the cut, 0 elsewhere.
+    - ``neg_const = (H ≤ 0)``: 1 on the negative side and in the uncut region, 0 on the positive side.
+
+    At ``alpha=0``, ``H=0`` everywhere so ``neg_const=1`` for all points (identical to the
+    traditional single constant handle).  At ``alpha>0`` the two handles decouple.
+
+    Output shape: ``(N, num_handles + 2)``.
+
+    Args:
+        rkpm_model (SimplicitsRKPM): RKPM model initialized in 4D.
+        pts (torch.Tensor): ``(N, 3)`` geometry points (stored for refit).
+        yms (torch.Tensor): ``(N,)`` Young's moduli.
+        prs (torch.Tensor): ``(N,)`` Poisson's ratios.
+        rhos (torch.Tensor): ``(N,)`` densities.
+        appx_vol (torch.Tensor): Approximate volume scalar.
+    """
+
+    #: Number of constant (rigid-body) handles appended to the RKPM weights.
+    #: Two handles — one per cut side — allow each fractured piece to translate
+    #: independently.
+    num_constant_handles: int = 2
+
+    def __init__(self, rkpm_model, pts, yms, prs, rhos, appx_vol):
+        super().__init__()
+        self.rkpm_model = rkpm_model
+        self.pts = pts
+        self.yms = yms
+        self.prs = prs
+        self.rhos = rhos
+        self.appx_vol = appx_vol
+
+    def refit(self, cut):
+        """Fully recompute 4D RKPM eigenvectors for a new cut topology (new alpha)."""
+        self.rkpm_model.init(self.pts, self.yms, self.prs, self.rhos,
+                             self.appx_vol, cut=cut)
+
+    def forward(self, pts, cut):
+        dtype = pts.dtype
+        weights = self.rkpm_model(pts, cut=cut)            # (N, num_handles)
+
+        normal = cut.normal.to(device=pts.device, dtype=torch.float32)
+        center = cut.center.to(device=pts.device, dtype=torch.float32)
+        pts_f = pts.float()
+
+        signed_dist = ((pts_f - center) * normal).sum(dim=-1, keepdim=True)   # (N, 1)
+
+        effective_radius = cut.radius * cut.alpha
+        if effective_radius > 0:
+            # Inside the active cut front: binary assignment — exactly 1 or 0, no transition zone.
+            # Outside: 0.5/0.5 so uncut points aren't pulled toward either side.
+            proj_in_plane = pts_f - signed_dist * normal
+            radial_dist = (proj_in_plane - center).norm(dim=-1, keepdim=True)  # (N, 1)
+            inside_mask = (radial_dist <= effective_radius).to(dtype)           # binary 0/1
+            on_pos_side = (signed_dist > 0).to(dtype)                           # binary 0/1
+            pos_const = on_pos_side * inside_mask + 0.5 * (1.0 - inside_mask)
+        else:
+            # alpha=0: no cut active. pos_const is a tiny uniform value — no spatial
+            # split visible, but non-zero so the handle doesn't produce a zero column
+            # in the Hessian (which would make torch.linalg.solve fail).
+            pos_const = torch.full((pts.shape[0], 1), 1e-3,
+                                   device=pts.device, dtype=dtype)
+
+        neg_const = 1.0 - pos_const
+        return torch.cat([weights, pos_const, neg_const], dim=1)  # (N, num_handles + 2)
+
+    def grad(self, pts, cut):
+        """3D Jacobian via analytical RKPM gradient (with chain rule through H(x) in 4D mode).
+
+        The two side-specific constant handles are binary step functions of H, whose
+        spatial gradient is zero almost everywhere (delta at H=0, a measure-zero set).
+
+        Returns:
+            torch.Tensor: ``(N, num_handles + 2, 3)``
+        """
+        dtype = pts.dtype
+        w_grad = self.rkpm_model.grad_3d(pts, cut)   # (N, num_handles, 3)
+        zeros = torch.zeros(pts.shape[0], 2, 3, device=pts.device, dtype=dtype)
+        return torch.cat([w_grad.to(dtype), zeros], dim=1)  # (N, num_handles+2, 3)
+
 
 class SkinningWeightsFcn:
     r"""Universal skinning weight wrapper. Calls model and appends constant handle column.
@@ -271,8 +364,12 @@ class SimplicitsObject(PhysicsPoints):
             sampled = self.subsample(num_pts=num_qp, sample_indices=qp_idx)
 
         with torch.no_grad():
-            weights = self.skinning_weight_function(sampled.pts)
-            weights_jac = self.skinning_weight_function.grad(sampled.pts)
+            if self.cut is not None:
+                weights = self.skinning_weight_function(sampled.pts, self.cut)
+                weights_jac = self.skinning_weight_function.grad(sampled.pts, self.cut)
+            else:
+                weights = self.skinning_weight_function(sampled.pts)
+                weights_jac = self.skinning_weight_function.grad(sampled.pts)
 
         return SkinnedPhysicsPoints(
             pts=sampled.pts, yms=sampled.yms, prs=sampled.prs,
@@ -499,6 +596,69 @@ class SimplicitsObject(PhysicsPoints):
 
         return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function)
 
+    @staticmethod
+    def create_rkpm_with_cut(pts, yms, prs, rhos, appx_vol, cut,
+                             num_handles=10,
+                             num_nodes=1024,
+                             num_points=None,
+                             use_double=True,
+                             initial_cut_alpha=0.0,
+                             cutoff_factor=3.0):
+        r"""Create a :class:`SimplicitsObject` with 4D-lifted RKPM weights and a :class:`DiscCut`.
+
+        Eigenvectors are computed in 4D space ``(x, y, z, H)`` where ``H`` is the lifted
+        winding number across the cut.  Points on opposite sides of the cut have ``H ≈ ±1``,
+        giving large 4D kernel distances so eigenvectors localize to one side.
+
+        No training is required — RKPM is fully analytical.  Call
+        :meth:`SimplicitsScene.set_cut_progress_rkpm` to animate the fracture; this
+        recomputes eigenvectors for the new alpha.
+
+        Total handles = ``num_handles + 1`` (extra constant handle always appended).
+
+        Args:
+            pts (torch.Tensor): ``(N, 3)`` geometry points.
+            yms (Union[torch.Tensor, float]): Young's moduli (per-point or scalar).
+            prs (Union[torch.Tensor, float]): Poisson's ratios (per-point or scalar).
+            rhos (Union[torch.Tensor, float]): Densities (per-point or scalar).
+            appx_vol (Union[torch.Tensor, float]): Approximate volume.
+            cut (DiscCut): Cut surface definition.
+            num_handles (int): Number of RKPM eigenmodes. Defaults to 10.
+            num_nodes (int): Number of RKPM kernel nodes. Defaults to 1024.
+            num_points (int, optional): Integration points for eigenanalysis. Defaults to None (all pts).
+            use_double (bool): Use float64 for RKPM computations. Defaults to True.
+            initial_cut_alpha (float): Starting cut progress in ``[0, 1]``. Defaults to 0.0.
+
+        Returns:
+            SimplicitsObject: Object with 4D RKPM skinning weights and the given cut.
+        """
+        if num_handles == 0:
+            warnings.warn(
+                f'Num Handles is 0. Simplicits Object will be created as rigid.', UserWarning)
+            return SimplicitsObject.create_rigid(pts, yms, prs, rhos, appx_vol)
+
+        device = pts.device
+        if not torch.is_tensor(yms):
+            yms = torch.full((pts.shape[0],), yms, device=device, dtype=pts.dtype)
+        if not torch.is_tensor(prs):
+            prs = torch.full((pts.shape[0],), prs, device=device, dtype=pts.dtype)
+        if not torch.is_tensor(rhos):
+            rhos = torch.full((pts.shape[0],), rhos, device=device, dtype=pts.dtype)
+        if not torch.is_tensor(appx_vol):
+            appx_vol = torch.tensor([appx_vol], device=device, dtype=pts.dtype)
+
+        cut.alpha = initial_cut_alpha
+        model = SimplicitsRKPM(num_handles, num_nodes, num_points=num_points, use_double=use_double,
+                               cutoff_factor=cutoff_factor)
+        model.to(device)
+        model.init(pts, yms, prs, rhos, appx_vol, cut=cut)
+
+        skinning_weight_function = WoundRKPMSkinningWeightsFcn(
+            model, pts, yms, prs, rhos, appx_vol)
+
+        return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function, cut=cut)
+
+
 
 
     @staticmethod
@@ -567,7 +727,7 @@ class SimplicitsObject(PhysicsPoints):
             skinning_weight_function = SkinningWeightsFcn(fcn)
         return SimplicitsObject(pts, yms, prs, rhos, appx_vol, skinning_weight_function=skinning_weight_function)
 
-    def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weight_function=None):
+    def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weight_function=None, cut=None):
         r"""Initialize a SimplicitsObject with geometry, material properties, and skinning weights.
 
         A SimplicitsObject is a collection of points, material properties, and a linear blend skinning
@@ -592,11 +752,17 @@ class SimplicitsObject(PhysicsPoints):
                 - A float value
             skinning_weight_function (callable, optional): Function that takes points and returns skinning weights matrix.
                 If None, the object will be rigid. Defaults to None
+            cut (DiscCut, optional): Cut surface for fracture simulation. If provided, the skinning
+                weight function must accept a second ``cut`` argument. Defaults to None.
 
         """
         super().__init__(pts=pts, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol)
 
-        self.num_handles = skinning_weight_function(pts[:1]).shape[1]
+        self.cut = cut
+        if cut is not None:
+            self.num_handles = skinning_weight_function(pts[:1], cut).shape[1]
+        else:
+            self.num_handles = skinning_weight_function(pts[:1]).shape[1]
 
         self.skinning_weight_function = skinning_weight_function
 
@@ -614,7 +780,8 @@ class SimplicitsObject(PhysicsPoints):
             prs=sampled_points.prs,
             rhos=sampled_points.rhos,
             appx_vol=sampled_points.appx_vol,
-            skinning_weight_function=self.skinning_weight_function
+            skinning_weight_function=self.skinning_weight_function,
+            cut=self.cut
         )
 
 
@@ -631,17 +798,25 @@ class SimulatedObject(SkinnedPhysicsPoints):
 
     @classmethod
     def from_skinned_physics_points(cls, phys_pts: SkinnedPhysicsPointsProtocol, init_transform,
-                                     is_kinematic=False, normalize_weights_by_samples=False, apply_qr=False):
+                                     is_kinematic=False, normalize_weights_by_samples=False, apply_qr=False,
+                                     simplicits_object=None):
         """Creates simulation object from skinned physics points (e.g. from bake_for_simulation or disk)."""
         return cls(pts=phys_pts.pts, yms=phys_pts.yms, prs=phys_pts.prs, rhos=phys_pts.rhos, appx_vol=phys_pts.appx_vol,
                    skinning_weights=phys_pts.skinning_weights, skinning_weights_jac=phys_pts.skinning_weights_jac,
                    init_transform=init_transform, is_kinematic=is_kinematic,
-                   normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr)
+                   normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr,
+                   simplicits_object=simplicits_object)
 
     def __init__(self, pts, yms, prs, rhos, appx_vol, skinning_weights, skinning_weights_jac=None,
-                 init_transform=None, is_kinematic=False, normalize_weights_by_samples=False, apply_qr=False):
+                 init_transform=None, is_kinematic=False, normalize_weights_by_samples=False, apply_qr=False,
+                 simplicits_object=None):
         super().__init__(pts=pts, yms=yms, prs=prs, rhos=rhos, appx_vol=appx_vol,
                          skinning_weights=skinning_weights, skinning_weights_jac=skinning_weights_jac)
+        # TODO: Clean up — SimulatedObject should not depend on SimplicitsObject directly.
+        # We may not always have access to the original SimplicitsObject (e.g. when loading
+        # baked weights from disk). The cut-aware dFdz recomputation should be refactored
+        # to not require the full SimplicitsObject reference.
+        self.simplicits_object = simplicits_object
         self.init_transform = init_transform
         self.is_kinematic = is_kinematic
         self.normalize_weights_by_samples = normalize_weights_by_samples
@@ -665,6 +840,8 @@ class SimulatedObject(SkinnedPhysicsPoints):
             wp.from_torch(self.pts, dtype=wp.vec3))
         self.B.nnz_sync()
 
+        cut = self.simplicits_object.cut if self.simplicits_object is not None else None
+
         # 3. Compute sparse dFdz matrix
         if is_kinematic:
             num_rows = 9 * self.pts.shape[0]
@@ -675,6 +852,20 @@ class SimulatedObject(SkinnedPhysicsPoints):
                 self.skinning_weights.detach().cpu().numpy(),
                 self.skinning_weights_jac.detach().cpu().numpy(),
                 self.pts.detach().cpu().numpy())
+
+            if self.simplicits_object is not None:
+                with torch.no_grad():
+                    if cut is not None:
+                        sim_weights = self.simplicits_object.skinning_weight_function(
+                            self.sample_pts, cut)
+                        sim_weights_jac = self.simplicits_object.skinning_weight_function.grad(
+                            self.sample_pts, cut)
+                    else:
+                        sim_weights = self.simplicits_object.skinning_weight_function(self.sample_pts)
+                        sim_weights_jac = self.simplicits_object.skinning_weight_function.grad(
+                            self.sample_pts)
+                self.sample_dFdz = sparse_dFdz_matrix(sim_weights, sim_weights_jac, self.sample_pts)
+
         self.dFdz.nnz_sync()
 
         # Dense versions (computed on demand)
@@ -766,6 +957,31 @@ class SimulatedObject(SkinnedPhysicsPoints):
 
         self.z_prev = self.z.clone().detach()
         self.z_dot = torch.zeros_like(self.z, device=self.device)
+
+    @property
+    def sample_pts(self):
+        """Alias for pts — the quadrature/sample points used by set_cut_progress_rkpm."""
+        return self.pts
+
+    def _set_sim_constants(self):
+        """Rebuild sparse B and dFdz from current skinning_weights / skinning_weights_jac.
+
+        Called by SimplicitsScene.set_cut_progress_rkpm after new weights are computed.
+        """
+        self._B_dense = None
+        self._dFdz_dense = None
+        self.B = sparse_lbs_matrix(
+            wp.from_torch(self.skinning_weights),
+            wp.from_torch(self.pts, dtype=wp.vec3))
+        self.B.nnz_sync()
+        if not self.is_kinematic:
+            self.dFdz = sparse_dFdz_matrix(
+                self.skinning_weights.detach().cpu().numpy(),
+                self.skinning_weights_jac.detach().cpu().numpy(),
+                self.pts.detach().cpu().numpy())
+            self.dFdz.nnz_sync()
+        if self.apply_qr:
+            self._apply_qr_decomposition()
 
     def __str__(self):
         r"""String describing object.
@@ -1170,7 +1386,8 @@ class SimplicitsScene:
             baked = sim_object.bake_for_simulation(num_qp=num_qp)
             simulated_object = SimulatedObject.from_skinned_physics_points(
                 baked, init_transform=relative_transform, is_kinematic=is_kinematic,
-                normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr)
+                normalize_weights_by_samples=normalize_weights_by_samples, apply_qr=apply_qr,
+                simplicits_object=sim_object)
             simulated_object.skinning_weight_function = sim_object.skinning_weight_function
         else:
             sampled = sim_object.subsample(num_qp) if num_qp is not None else sim_object
@@ -1200,6 +1417,63 @@ class SimplicitsScene:
         t_sim_z[wp.to_torch(self.object_to_z_map[obj_idx])] = obj.z.flatten()
         
         self.sim_z = wp.from_torch(t_sim_z)
+
+    def set_cut_progress_rkpm(self, obj_id, alpha):  # pragma: no cover
+        r"""Update cut progress for an RKPM object: refit 4D eigenvectors then rebuild sim constants.
+
+        Calls :meth:`WoundRKPMSkinningWeightsFcn.refit` to recompute the RKPM eigenvectors
+        in 4D space for the new ``alpha``, then rebuilds all sparse simulation matrices
+        (``B``, ``dFdz``, ``BMB``).  The current simulation state (DOF positions, velocities)
+        is **preserved** — the fracture progresses without resetting the motion.
+
+        Args:
+            obj_id (int): Id of the object to update (as returned by :meth:`add_object`).
+            alpha (float): Cut progress in ``[0, 1]``.  ``0`` = uncut, ``1`` = fully cut.
+
+        Raises:
+            RuntimeError: If the scene forces have not been set up yet.
+            ValueError: If the object does not have a cut.
+        """
+        if not self._ready_for_forces:
+            raise RuntimeError(
+                "Scene is not ready for simulation. Call set_scene_gravity, "
+                "set_scene_floor, or a similar force-setup method first.")
+
+        obj = self.sim_obj_dict[obj_id]
+        if obj.simplicits_object.cut is None:
+            raise ValueError(
+                f"Object {obj_id} does not have a cut. Create the object with "
+                "SimplicitsObject.create_rkpm_with_cut(...).")
+
+        obj.simplicits_object.cut.alpha = alpha
+
+        # Step 1: Recompute 4D RKPM eigenvectors for the new topology.
+        obj.simplicits_object.skinning_weight_function.refit(obj.simplicits_object.cut)
+
+        # Step 2: Recompute skinning weights at the existing quadrature points.
+        with torch.no_grad():
+            obj.skinning_weights = obj.simplicits_object.skinning_weight_function(
+                obj.sample_pts, obj.simplicits_object.cut)
+            obj.skinning_weights_jac = obj.simplicits_object.skinning_weight_function.grad(
+                obj.sample_pts, obj.simplicits_object.cut)
+
+        # Save current DOF state so it can be restored after the rebuild.
+        saved_z = wp.to_torch(self.sim_z).clone()
+        saved_z_prev = wp.to_torch(self.sim_z_prev).clone()
+        saved_z_dot = wp.to_torch(self.sim_z_dot).clone()
+        saved_sim_step = self.current_sim_step
+
+        # Step 3: Rebuild sparse sim matrices and global scene constants.
+        obj._set_sim_constants()
+        self._compute_sim_constants()
+        self._create_sim_variables()
+
+        # Restore simulation state.
+        self.sim_z = wp.from_torch(saved_z.contiguous())
+        self.sim_z_prev = wp.from_torch(saved_z_prev.contiguous())
+        self.sim_z_dot = wp.from_torch(saved_z_dot.contiguous())
+        self.current_sim_step = saved_sim_step
+
 
     def set_scene_gravity(self, acc_gravity=torch.tensor([0, 9.8, 0]), gravity_coeff=1.0):
         r"""Sets the gravity in the scene. Applies it to all objects in scene.
@@ -1746,16 +2020,33 @@ class SimplicitsScene:
         """
         return self.sim_obj_dict[obj_idx]
 
-    def get_object_deformed_pts(self, obj_idx, points: Literal['rendered', 'simulated'] = 'simulated'):
+    def get_object_deformed_pts(self, obj_idx,
+                                points: Union[Literal['rendered', 'simulated'], torch.Tensor] = 'simulated'):
         r"""Applies linear blend skinning using object's transformation to deform points.
 
         Args:
             obj_idx (int): Id of object being transformed
-            points: 'simulated' (default) to use simulation points, 'rendered' for rendered points.
+            points: 'simulated' (default) to use simulation quadrature points,
+                'rendered' for pre-baked rendered points, or a torch.Tensor
+                of shape (N, 3) to deform arbitrary points using the
+                skinning weight function.
 
         Returns:
             torch.Tensor: Transformed points
         """
+        if torch.is_tensor(points):
+            obj = self.get_object(obj_idx)
+            skinning_fn = getattr(obj, 'skinning_weight_function', None)
+            if skinning_fn is None:
+                raise ValueError(
+                    f"Object {obj_idx} does not have a skinning_weight_function. "
+                    "Passing a tensor requires the object to have been added from a SimplicitsObject.")
+            tfms = self.get_object_transforms(obj_idx)[:, :3, :]
+            cut = obj.simplicits_object.cut if obj.simplicits_object is not None else None
+            with torch.no_grad():
+                weights = skinning_fn(points, cut) if cut is not None else skinning_fn(points)
+            return standard_lbs(points, tfms.unsqueeze(0), weights).squeeze()
+
         if points == 'simulated':
             obj = self.get_object(obj_idx)
         elif points == 'rendered':
@@ -1763,7 +2054,7 @@ class SimplicitsScene:
                 raise ValueError(f'Object {obj_idx} was not saved with rendered points')
             obj = self.render_obj_dict[obj_idx]
         else:
-            raise ValueError(f'Only supports "rendered" or "simulated" points')
+            raise ValueError(f'Only supports "rendered", "simulated", or a torch.Tensor of points')
 
         if points == 'simulated':
             # Simulated points use normalized weights — use internal transforms
